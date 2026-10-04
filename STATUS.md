@@ -4,7 +4,7 @@ _Last updated: 2026-10-04_
 
 **Milestone:** M0: prove the boundaries (PLAN.md §3, §11)
 **State:** M0.1–M0.6 done; M0.7 done except the supervisor test. Results are in `docs/compat-record.md` (findings 1–19; C1–C5, C7–C12 Tested; C6 pending).
-**Next action:** owner decides how to run the supervisor test (see Blockers). Then M0.8: write `docs/architecture.md` (chosen architecture + limitations) with decision cards for the owner.
+**Next action:** the supervisor test was started from the build session (owner's choice, 2026-10-04) and may have ended that session. If its results aren't in `docs/compat-record.md` C6 yet, read `spikes/out/m0.7/run.log` and `spikes/out/m0.7/supervisor.out`, record them, and clean up any leftover `m07-sup` session. Then M0.8: write `docs/architecture.md` (chosen architecture + limitations) with decision cards for the owner.
 
 **Spike budget:** 22 / 30 real Claude sessions used (Haiku, trivial prompts; ask before exceeding).
 
@@ -26,7 +26,7 @@ Goal: a compatibility record plus tested answers for every Claude Code primitive
 - **Leftovers you may delete:** your empty background session `5dae2532` in the sandbox (`claude rm 5dae2532`), and `~/scratch/baton-sandbox` once M0.7 no longer needs an untrusted folder.
 
 ## Blockers
-- **Supervisor test (owner decision):** one supervisor runs every background session on the machine, including yours and any build session. Options: ★ run `CONFIRM=yes spikes/m0.7-failures.sh supervisor` yourself from a terminal when no background session matters, then ask a session to record the results from `spikes/out/m0.7/run.log`; or let a session run it (it may end that session mid-run); or skip and rely on the docs plus Baton's reconcile-on-start.
+None. (Supervisor test: owner chose to run it from the build session; see Next action.)
 
 ## Done
 - 2026-10-04: Repo initialized with CLAUDE.md, STATUS.md and docs/decisions.md. Confirmed Rust 1.99 and Claude Code 2.1.289 are installed.
