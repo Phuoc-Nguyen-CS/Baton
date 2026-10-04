@@ -25,3 +25,8 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | D6: tokens/cost from OTel into the daemon, quota from the status line, transcript as cross-check | Owner | R |
 | 2026-10-04 | D7: M1 scope = PLAN.md M1 as written; first slice `baton task "<goal>"` → one worker → checks → review | Owner | |
 | 2026-10-04 | Spike sandbox is `~/projects/baton-sandbox` (was `~/scratch/…`); `~/scratch/baton-sandbox` stays untrusted for trust tests | Claude (R) | Owner trusts the sandbox once |
+| 2026-10-04 | M1 plan approved; start M1 | Owner | "continue now with M1"; real-model budget still open |
+| 2026-10-04 | Cargo virtual workspace with one crate `crates/baton` (lib + `baton` bin); split crates when a boundary helps | Claude (R) | |
+| 2026-10-04 | State schema: times in epoch ms, states validated in Rust (no SQL CHECK), migrations via `PRAGMA user_version`; v1 may be edited in place until the M1 demo, append-only after | Claude (R) | `crates/baton/src/schema.sql` |
+| 2026-10-04 | `baton doctor` reads `~/.claude.json` read-only for the repo's `hasTrustDialogAccepted` only; best effort, dispatch's `Workspace not trusted` stays authoritative | Claude (R) | C15 |
+| 2026-10-04 | `Backend` calls are blocking (short CLI invocations); the daemon runs them off its event loop | Claude (R) | Keeps the trait object-safe |
