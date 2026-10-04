@@ -41,6 +41,8 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 15. **Workers don't report their own failures reliably.** A worker whose `git push` was denied (`is_error: true`) still replied just "DONE". Baton must verify outcomes itself. (Tested)
 16. **Baton can answer permission requests, safely bounded.** A `PermissionRequest` hook that waits on Baton's inbox gets allow/deny honoured; past its timeout it's killed and the native prompt remains, so a late or lost answer never grants anything. A stuck prompt can be recovered without a terminal by stop + flag-free resume, which re-asks through the hook. The `waitingFor: "permission prompt"` row appears as soon as the request starts, even while Baton's hook is still deciding. (Tested)
 17. **A `PreToolUse` deny hook is the visible push block.** Unlike a deny rule, Baton records every attempt; the worker sees the reason, labelled "hook error". (Tested)
+18. **Baton can steer workers with hooks and the CLI alone.** Busy: a `PostToolUse` hook reading Baton's queue delivers at the next tool boundary (wait ≈ the running tool), a `Stop` hook at turn end; the hook's own log is the delivery receipt. Idle: `claude stop` + flag-free resume with the instruction as the prompt (≈2 s to delivery, same session). `SendMessage` also works for both and is near-instant when idle, but needs a Claude session as the sender. Resuming a live idle session is **not** a route: it copies. (Tested)
+19. **Don't read "finished" from `state`.** One idle worker showed `working`, then `blocked`, never `done`. Use `status`, the `Stop` hook, and `Notification` `idle_prompt` (60 s after idle). (Tested)
 
 ## Capabilities
 
@@ -97,12 +99,24 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 - **Doc, cross-session messaging (v2.1.224+):** `ListAgents`/`SendMessage` between local sessions, including background ones, over a per-session Unix socket (`CLAUDE_CODE_MESSAGING_SOCKET`). Delivery: idle → new turn; busy → read between tool calls. Inbound controls are `crossSessionInbound` (`accept`/`hold`/`refuse`, settable via `--settings`). With no value set, a prompting session accepts messages. A message can't approve permissions or change config. Max 50 queued, 100 held. `notify_when_idle` gives one idle notice. Auth line `{"type":"auth","token":…}` documented; message line format **undocumented**.
 - **Doc, Stop hook:** `decision: "block"` + `reason`, or `additionalContext`, continues the turn. Input has `stop_hook_active`; cap of 8 consecutive continuations (`CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`). Only runs at turn end, so it can't wake an idle session.
 - **Doc, Channels:** research preview. An MCP server pushes `notifications/claude/channel`; custom channels need `--dangerously-load-development-channels`; optional permission relay. Not part of the first release (PLAN.md §3).
-- **Tested:** — (M0.5: delivery, acknowledgment, latency for each)
+- **Tested (2026-10-04, `spikes/m0.5-steering.sh`; Haiku worker, ack = worker creates `ack-<id>.txt`):**
+
+  | Route | Worker | Queued/sent → delivered | Delivered → acted | Delivery signal |
+  |---|---|---|---|---|
+  | `PostToolUse` hook injects Baton's queued file as `additionalContext` | busy | 5.0 s (rest of the running tool) | 2.0 s | hook logs it; transcript `hook_additional_context` |
+  | `Stop` hook injects it as `additionalContext` | turn ending | at turn end | 1.5 s | same; next `Stop` has `stop_hook_active: true` |
+  | `SendMessage` from another Claude session | idle | ≤ 0.1 s, starts a new turn | 2.6 s | worker `UserPromptSubmit` |
+  | `SendMessage` | busy | queued (`queued_command`), delivered when the running tool finished (~3.8 s) | 2.3 s | worker `UserPromptSubmit` mid-turn |
+  | `claude stop` + flag-free `--resume <uuid> --bg "<instruction>"` | idle | 2.1 s (stop 0.4 s + wake 1.5 s) | 1.8 s | `SessionStart` `resume` + `UserPromptSubmit` |
+  | flag-free `--resume` while the process is alive and idle | idle | **not a route**: started a copy, which wrote its ack into the original's worktree | | |
+
+  The worker had `crossSessionInbound: "accept"` in `--settings`. A message arrives as `<cross-session-message from="uds:/run/user/<uid>/cc-socks/<pid>.sock" from-name="<sender name>" …>`. The sender's `SendMessage` result only says "in that session's inbox, not yet read". Raw socket posting not tested (format undocumented).
 - **Fallback:** native `attach`.
 
 ### C11 Completion and attention signals
 - **Doc:** `Stop` hook per turn; `Notification` types `agent_needs_input` and `agent_completed` fire **only while agent view is open in a terminal**; `SessionStart` `source` = `startup|resume|clear|compact|fork`.
 - **Tested:** —
+- **Tested (M0.5):** `Notification` `idle_prompt` fired 60 s after the worker went idle. While idle, the same worker's row read `working`/`idle`, then later `blocked`/`idle`, never `done`; only `status: idle` was consistent.
 - **Tested (M0.3):** `Stop` fires at each finished turn with `last_assistant_message`; `claude stop` mid-turn fires `SessionEnd` (`reason: other`) and no `Stop`. `SessionStart` reports `source: startup|resume`.
 - **Fallback:** poll `agents --json`.
 
