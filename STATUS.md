@@ -3,8 +3,8 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M0: prove the boundaries (PLAN.md §3, §11)
-**State:** M0.1–M0.7 done. Results are in `docs/compat-record.md` (findings 1–20; C1–C12 and C15 Tested; C13 deferred to M3; C14 is policy).
-**Next action:** M0.8: write `docs/architecture.md` (chosen architecture + known limitations, from findings 1–20) with decision cards for the owner; owner approval closes M0 and opens M1.
+**State:** M0.1–M0.7 done; M0.8 drafted: `docs/architecture.md`, **awaiting owner approval**.
+**Next action:** owner reviews `docs/architecture.md` §6 and answers decision cards D1–D7. Record the answers in `docs/decisions.md`, mark M0 done, then plan M1's first slice.
 
 **Spike budget:** 23 / 30 real Claude sessions used (Haiku, trivial prompts; ask before exceeding).
 
@@ -18,7 +18,7 @@ Goal: a compatibility record plus tested answers for every Claude Code primitive
 - [x] **M0.5 Steering**: `spikes/m0.5-steering.sh`. Busy: `PostToolUse`/`Stop` hooks deliver Baton's queued instruction at the next tool boundary or turn end. Idle: `claude stop` + flag-free resume with the instruction (~2 s). `SendMessage` works for both but needs a Claude sender. Resuming a live idle session makes a copy.
 - [x] **M0.6 Telemetry**: `spikes/m0.6-telemetry.sh`. OTel, transcript and status line agree exactly on tokens/cost while detached; quota only from the status line (refreshes while idle); OTel = per-process deltas, status-line cost = cumulative snapshot; OTel events carry owner identity.
 - [x] **M0.7 Failure paths**: `spikes/m0.7-failures.sh`. A deleted project agent makes a resumed worker silently widen to default tools (detect via `SessionStart` `agent_type`). Workers survive a supervisor stop or `kill -9` and get re-adopted by the next one. Untrusted folder done in M0.2; mid-tool cancellation in M0.4.
-- [ ] **M0.8 Write-up**: chosen architecture + known limitations in `docs/architecture.md`; owner approves → M1.
+- [ ] **M0.8 Write-up**: `docs/architecture.md` drafted (shape, worker lifecycle, usage, state, 10 limitations, decision cards D1–D7). Owner approves → M1.
 
 ## Waiting on owner (not blocking)
 - **Remote backup:** approved, but `gh` isn't installed. Either `sudo apt install gh && gh auth login`, or create an empty private repo on github.com and give me its URL.
@@ -38,3 +38,4 @@ None. (Supervisor test: owner chose to run it from the build session; see Next a
 - 2026-10-04: M0.6 telemetry spike (2 sessions). Key findings: all usage sources agree while detached; quota only via the status line; mind delta vs cumulative counters and strip identity from OTel.
 - 2026-10-04: M0.7 failure paths, part 1 (2 sessions). Key finding: a deleted project agent silently widens a resumed worker to default tools, with no warning; only `SessionStart` `agent_type` shows it.
 - 2026-10-04: M0.7 supervisor test (1 session, run detached from the build session). Workers outlive a stopped or killed supervisor and are re-adopted; all live sessions survived.
+- 2026-10-04: M0.8 architecture drafted (`docs/architecture.md`), awaiting owner decisions D1–D7.

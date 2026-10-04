@@ -6,6 +6,8 @@ Local Rust TUI + daemon that coordinates Claude Code background sessions and del
 - **Spec:** `PLAN.md` Part B (the build prompt). Part A is the rationale. Read the section for the current milestone; don't load the whole file unless needed.
 - **Where we are / what's next:** `STATUS.md` (imported below).
 - **Settled decisions:** `docs/decisions.md` (imported below). Don't reopen these unless the owner does.
+- **Architecture:** `docs/architecture.md` (how Baton drives Claude Code, limitations, owner decision cards).
+- **Claude Code evidence:** `docs/compat-record.md` (findings F1–F20, per-capability Doc/Probed/Tested); re-run `spikes/` on Claude Code upgrades.
 - **History:** `git log`.
 
 @STATUS.md
