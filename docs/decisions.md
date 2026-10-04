@@ -11,3 +11,6 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | Personal tool first, maybe open source later | Owner | |
 | 2026-10-04 | Progress lives in the repo: CLAUDE.md imports STATUS.md and this file; commit after each chunk | Claude (R) | |
 | 2026-10-04 | M0 spikes are throwaway shell scripts in `spikes/`; Rust code starts at M1 | Claude (R) | |
+| 2026-10-04 | M0 plan approved | Owner | STATUS.md |
+| 2026-10-04 | Spike spend: Haiku, trivial prompts, ≤20 real sessions for all of M0; ask before exceeding | Owner | Counter in STATUS.md |
+| 2026-10-04 | Remote backup: private GitHub repo | Owner | Owner creates it; not blocking |
