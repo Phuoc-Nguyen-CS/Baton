@@ -14,3 +14,4 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | M0 plan approved | Owner | STATUS.md |
 | 2026-10-04 | Spike spend: Haiku, trivial prompts, ≤20 real sessions for all of M0; ask before exceeding | Owner | Counter in STATUS.md |
 | 2026-10-04 | Remote backup: private GitHub repo | Owner | Owner creates it; not blocking |
+| 2026-10-04 | Spike sandbox is `~/projects/baton-sandbox` (was `~/scratch/…`); `~/scratch/baton-sandbox` stays untrusted for trust tests | Claude (R) | Owner trusts the sandbox once |

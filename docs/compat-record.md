@@ -31,6 +31,7 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 5. **`--bare` is unusable for workers.** It skips hooks, CLAUDE.md and the messaging inbox. (Doc, Probed)
 6. **A missing role widens a resumed session silently.** If a session's agent definition is gone on resume, the session "continues with the default tools" plus a transcript warning. Baton must check before resuming. (Doc)
 7. **Telemetry while detached is unproven.** The status line has quota fields, but it only runs when the UI renders. OpenTelemetry export is documented and doesn't need a UI, which makes it the best candidate. (Doc; Assumption for detached)
+8. **Every dispatch directory must be trusted interactively first.** A script can't accept the trust dialog, and trusting a parent folder didn't cover a new repo inside it (Tested). Baton needs a one-time "trust this repo" step for the owner.
 
 ## Capabilities
 
@@ -111,7 +112,11 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 - **Baton rule:** spawn the unmodified CLI under the owner's own login. Never read or store credentials. Re-check before any distribution. (Not legal advice.)
 
 ### C15 Workspace trust and failure paths
-- **Tested:** — (M0.7: untrusted folder with `--bg`, missing supervisor, cancellation)
+- **Doc:** `--bg` checks trust for its directory before starting. From a terminal it shows the dialog; "where no dialog can appear, such as in a script", it fails with `Workspace not trusted` (v2.1.281+).
+- **Probed:** no CLI flag or subcommand sets trust. Trust lives in `~/.claude.json` (`projects.<path>.hasTrustDialogAccepted`), which Baton must not edit.
+- **Tested (2026-10-04, `spikes/m0.2-lifecycle.sh spawn-a`):** from a non-TTY shell, `claude --bg` in an untrusted repo exits 1 with ``Workspace not trusted. Run `claude` in <dir> once and accept the trust prompt, then retry.`` No session starts and no quota is used. Trust on `~/projects` (a non-git parent) did **not** extend to a new git repo at `~/projects/baton-sandbox`.
+- **Pending:** do Baton-made worktrees inherit their repo's trust (M0.2 `spawn-b`)? Missing supervisor and cancellation (M0.7).
+- **Fallback:** Baton checks trust before dispatch, and its doctor tells the owner to run `claude` in the repo once.
 
 [agent-view]: https://code.claude.com/docs/en/agent-view
 [cli-reference]: https://code.claude.com/docs/en/cli-reference
