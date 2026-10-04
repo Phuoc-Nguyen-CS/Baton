@@ -1,6 +1,6 @@
 # Baton architecture (M0 output)
 
-**Status:** draft for owner approval, 2026-10-04. Built on Claude Code **2.1.289** on WSL2. Every claim about Claude Code below points to a finding (F1–F20) or capability (C1–C15) in [`compat-record.md`](compat-record.md), where the evidence and the spike that produced it live. The product scope is [`PLAN.md`](../PLAN.md) Part B; this document only says *how* Baton meets it on top of Claude Code.
+**Status:** approved by the owner on 2026-10-04, with every ★ option in §6 (recorded in [`decisions.md`](decisions.md)). Built on Claude Code **2.1.289** on WSL2. Every claim about Claude Code below points to a finding (F1–F20) or capability (C1–C15) in [`compat-record.md`](compat-record.md), where the evidence and the spike that produced it live. The product scope is [`PLAN.md`](../PLAN.md) Part B; this document only says *how* Baton meets it on top of Claude Code.
 
 ## 1. Shape
 
