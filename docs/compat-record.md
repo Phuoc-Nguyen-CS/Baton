@@ -30,7 +30,7 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 4. **Steering has a documented native path.** Cross-session messaging works for background sessions: an idle session starts a new turn, a busy one reads it between tool calls. The socket's auth line is documented but **the message line format is not**, so posting raw to the socket stays an Assumption. (Doc)
 5. **`--bare` is unusable for workers.** It skips hooks, CLAUDE.md and the messaging inbox. (Doc, Probed)
 6. **A missing role widens a resumed session silently.** If a session's agent definition is gone on resume, the session "continues with the default tools" plus a transcript warning. Baton must check before resuming. (Doc)
-7. **Telemetry while detached is unproven.** The status line has quota fields, but it only runs when the UI renders. OpenTelemetry export is documented and doesn't need a UI, which makes it the best candidate. (Doc; Assumption for detached)
+7. **Telemetry works while detached, and the sources agree.** OpenTelemetry (metrics and `api_request` events), the transcript and the status line all report the same tokens and cost for a detached worker. Only the status line has quota (`rate_limits.five_hour`/`seven_day`), and it keeps refreshing while the worker idles, until the process stops. Count with care: OTel sends per-process deltas (sum them); the status line's cost is a session-cumulative snapshot (don't sum); the transcript needs de-duplication by message id. OTel events carry the owner's email and account ids, so Baton strips them before storing. (Tested)
 8. **Every target repo must be trusted interactively once.** A script can't accept the trust dialog, and trusting a parent folder didn't cover a new repo inside it. Linked worktrees of a trusted repo pass, wherever they live. Baton needs a one-time "trust this repo" step for the owner. (Tested)
 9. **Any flag on `--resume` makes a copy.** `--resume <uuid> --bg` plus *any* other flag (`--model`, `--permission-mode`…) starts a copy with a new id: "keeps its own saved options, so the flags you passed started a copy". With no flags it wakes the same session with its saved options. Resuming a running session also copies. (Tested)
 10. **Copies are dangerous.** A copy carries the full conversation, starts in the original's dispatch directory, and edited the **original's** worktree. Baton must never create copies by accident: resume flag-free, and only after confirming the session isn't running. (Tested)
@@ -125,7 +125,20 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 - **Doc, OpenTelemetry:** `CLAUDE_CODE_ENABLE_TELEMETRY=1` with `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` = `otlp|console|…`. Project/local settings can only turn exporters *off*, so Baton enables them via the spawn environment or `--settings`.
 - **Doc, headless:** `-p --output-format json` reports `total_cost_usd`. Not applicable to `--bg`.
 - **Assumption:** transcript JSONL carries per-message `usage`; the format is undocumented, so treat it as a versioned, fallible adapter.
-- **Tested:** — (M0.6: which of these produce data while detached)
+- **Tested (2026-10-04, `spikes/m0.6-telemetry.sh`):** one Haiku worker (4 API requests, then stop + flag-free resume for 1 more), detached throughout, with OTel set via `--settings` `env` (`http/json` to a local receiver, metrics every 5 s, logs every 2 s) and a status line with `refreshInterval: 5`.
+
+  | After | Source | input | output | cache read | cache write | cost USD |
+  |---|---|---|---|---|---|---|
+  | 1st process | OTel `token.usage`/`cost.usage` metrics | 34 | 539 | 128,446 | 10,698 | 0.03697 |
+  | | OTel `api_request` events (4) | 34 | 539 | 128,446 | 10,698 | 0.03697 |
+  | | transcript (4 messages in 8 entries) | 34 | 539 | 128,446 | 10,698 | — |
+  | | status line `cost.total_cost_usd` | — | — | — | — | 0.03697 |
+  | + resumed process | OTel metrics and events (sum of deltas) | 44 | 572 | 163,739 | 11,107 | 0.04149 |
+  | | transcript (5 messages in 10 entries) | 44 | 572 | 163,739 | 11,107 | — |
+  | | status line (already cumulative) | — | — | — | — | 0.04149 |
+
+  Status line: ran 23 times, including every 5 s while idle; silent while the process was stopped; `rate_limits` present (`five_hour` 16% → 17%, `seven_day` 13%, with `resets_at`); `context_window.used_percentage` 18. OTel: same `session.id` across both processes; metric names `token.usage`, `cost.usage`, `session.count`, `active_time.total`, `lines_of_code.count`, `code_edit_tool.decision`; events include `api_request`, `user_prompt`, `tool_decision`, `tool_result`, `hook_execution_*`; every event carries `user.email`, `user.account_uuid`, `user.account_id`, `organization.id`. No OTel signal carries quota. Each request re-read ~32 K cached tokens (system prompt + tools).
+- **Baton rule:** tokens and cost from OTel (sum deltas, keyed by `session.id`) with the transcript as a cross-check; quota from the status line, labelled with its age; anything missing shows as unknown.
 - **Fallback:** show "telemetry unavailable" and never show 0.
 
 ### C13 Prompt-cache flags
