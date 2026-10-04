@@ -1,11 +1,15 @@
 //! SQLite state owned by the daemon (PLAN.md §4). A state change and its audit
 //! entry are written in the same transaction.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::types::Type;
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use serde_json::json;
+
+use crate::model::{Task, TaskState};
 
 /// Entry `i` moves the schema from version `i` to `i + 1`.
 const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
@@ -44,6 +48,73 @@ impl Store {
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         Ok(self.conn.transaction()?)
     }
+
+    /// Creates a queued task. Repeating a request id returns the task it created
+    /// (`false`) instead of a duplicate; reusing it for a different task is an error.
+    pub fn create_task(&mut self, new: &NewTask) -> Result<(Task, bool)> {
+        let tx = self.transaction()?;
+        let existing = tx
+            .query_row(&format!("{TASK_SELECT} WHERE request_id = ?1"), [&new.request_id], task_row)
+            .optional()?;
+        if let Some(task) = existing {
+            if task.repo != new.repo || task.goal != new.goal || task.checks != new.checks {
+                bail!("request id {} was already used for task {}", new.request_id, task.id);
+            }
+            return Ok((task, false));
+        }
+        let now = now_ms();
+        tx.execute(
+            "INSERT INTO task (request_id, repo, base_rev, goal, checks, state, observed_ms, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                new.request_id,
+                new.repo.to_string_lossy(),
+                new.base_rev,
+                new.goal,
+                serde_json::to_string(&new.checks)?,
+                TaskState::Queued,
+                now
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        audit(&tx, "task", id, "created", Some(&json!({ "state": TaskState::Queued, "request_id": new.request_id })))?;
+        let task = tx.query_row(&format!("{TASK_SELECT} WHERE id = ?1"), [id], task_row)?;
+        tx.commit()?;
+        Ok((task, true))
+    }
+
+    pub fn tasks(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(&format!("{TASK_SELECT} ORDER BY id"))?;
+        let tasks = stmt.query_map([], task_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(tasks)
+    }
+}
+
+pub struct NewTask {
+    pub request_id: String,
+    pub repo: PathBuf,
+    pub base_rev: String,
+    pub goal: String,
+    pub checks: Vec<String>,
+}
+
+const TASK_SELECT: &str = "SELECT id, request_id, repo, base_rev, goal, checks, state, state_reason, observed_ms, created_ms FROM task";
+
+fn task_row(r: &Row) -> rusqlite::Result<Task> {
+    let checks: String = r.get(5)?;
+    Ok(Task {
+        id: r.get(0)?,
+        request_id: r.get(1)?,
+        repo: PathBuf::from(r.get::<_, String>(2)?),
+        base_rev: r.get(3)?,
+        goal: r.get(4)?,
+        checks: serde_json::from_str(&checks)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(e)))?,
+        state: r.get(6)?,
+        state_reason: r.get(7)?,
+        observed_ms: r.get(8)?,
+        created_ms: r.get(9)?,
+    })
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -87,7 +158,42 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+
+    fn new_task(request_id: &str, goal: &str) -> NewTask {
+        NewTask {
+            request_id: request_id.into(),
+            repo: PathBuf::from("/repo"),
+            base_rev: "abc123".into(),
+            goal: goal.into(),
+            checks: vec!["cargo test".into()],
+        }
+    }
+
+    #[test]
+    fn create_task_is_idempotent_per_request_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (t1, created) = store.create_task(&new_task("r1", "add a greeting")).unwrap();
+        assert!(created);
+        assert_eq!(t1.state, TaskState::Queued);
+        assert_eq!(t1.checks, ["cargo test"]);
+
+        let (again, created) = store.create_task(&new_task("r1", "add a greeting")).unwrap();
+        assert!(!created);
+        assert_eq!(again, t1);
+
+        let err = store.create_task(&new_task("r1", "something else")).err().unwrap();
+        assert!(err.to_string().contains("already used"), "{err}");
+
+        store.create_task(&new_task("r2", "second")).unwrap();
+        let goals: Vec<String> = store.tasks().unwrap().into_iter().map(|t| t.goal).collect();
+        assert_eq!(goals, ["add a greeting", "second"]);
+
+        let audits: i64 = store
+            .conn()
+            .query_row("SELECT count(*) FROM audit WHERE event = 'created'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audits, 2, "one audit entry per created task, none for repeats");
+    }
 
     fn insert_task(conn: &Connection, request_id: &str) -> rusqlite::Result<i64> {
         conn.execute(

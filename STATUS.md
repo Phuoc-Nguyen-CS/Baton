@@ -3,8 +3,8 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M1: deliver one reviewable task (PLAN.md §11; architecture in `docs/architecture.md`)
-**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1 done.
-**Next action:** M1.2 (daemon + CLI, fake backend). The real-model budget (open decision 1) is needed before M1.3's end-to-end run.
+**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1–M1.2 done.
+**Next action:** M1.3: dispatch lifecycle against the fake backend first, then the Claude adapter and hooks. Its end-to-end run needs the real-model budget (open decision 1).
 
 **M0 summary:** 8 steps, 23 real sessions, findings F1–F20 in `docs/compat-record.md`; spike scripts in `spikes/` double as compatibility tests for Claude Code upgrades.
 
@@ -12,7 +12,7 @@ _Last updated: 2026-10-04_
 Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made worktree, independently checks the exact result, and shows it for accept / request changes / defer, in an 80×24 TUI and as JSON. Closing the TUI or restarting the daemon loses nothing. Each slice ends with a demo command and tests; real-model runs use the sandbox repo and count against the budget.
 
 - [x] **M1.1 Skeleton**: cargo workspace, one `baton` binary (clap: `daemon`, `task`, `status`, `decide`, `hook`, `doctor`), SQLite schema for task/attempt/session/workspace/candidate/verification/decision + audit log, `Backend` trait with a fake for tests. `baton doctor` checks `claude --version`, repo trust, git. Verify: `cargo test`, doctor on the sandbox.
-- [ ] **M1.2 Daemon + CLI**: daemon on a Unix socket owns state; `baton task` creates a task; `baton status --json`. Verify: state survives a daemon restart (fake backend).
+- [x] **M1.2 Daemon + CLI**: daemon on a Unix socket owns state; `baton task` creates a task; `baton status --json`. Verify: state survives a daemon restart. (Intake only; dispatch, and with it the fake backend, starts in M1.3.)
 - [ ] **M1.3 Claude adapter**: worktree (D1), settings file (hooks, deny rules, OTel env, status line), inline agent (D3), `claude --bg` dispatch, id parsing, `agents --json` polling; `baton hook <event>` → daemon, with local push and role guards (D4). Verify: one real worker runs a trivial task end to end.
 - [ ] **M1.4 Permissions**: `acceptEdits` + policy hook (D2); out-of-scope requests become decisions; `baton decide <id> allow|deny`; stop + resume recovery with exact-request matching. Verify: allow, deny, and late-answer cases.
 - [ ] **M1.5 Candidate + checks**: on the worker's final `Stop`, snapshot the worktree as a commit on `baton/<task>`, run the check command there, store results against that tree hash; any later change invalidates them. Verify: one passing and one failing check.
@@ -45,3 +45,4 @@ None.
 - 2026-10-04: M0.7 failure paths (3 sessions). Key findings: a deleted project agent silently widens a resumed worker to default tools, visible only via `SessionStart` `agent_type`; workers outlive a stopped or killed supervisor and are re-adopted.
 - 2026-10-04: M0.8 architecture approved by the owner (all ★); M0 closed.
 - 2026-10-04: M1.1 skeleton: `crates/baton` (clap CLI, SQLite schema v1 + audit log, `Backend` trait + fake, `baton doctor`); 13 tests; doctor passes on the sandbox and flags the untrusted `~/scratch` repo.
+- 2026-10-04: M1.2 daemon + CLI: `baton daemon` (Unix socket, single-instance lock), idempotent `baton task`, `baton status [--json]`; 20 tests incl. SIGTERM and SIGKILL restarts of the real binary; demoed on the sandbox.

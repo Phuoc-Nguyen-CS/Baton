@@ -30,3 +30,7 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | State schema: times in epoch ms, states validated in Rust (no SQL CHECK), migrations via `PRAGMA user_version`; v1 may be edited in place until the M1 demo, append-only after | Claude (R) | `crates/baton/src/schema.sql` |
 | 2026-10-04 | `baton doctor` reads `~/.claude.json` read-only for the repo's `hasTrustDialogAccepted` only; best effort, dispatch's `Workspace not trusted` stays authoritative | Claude (R) | C15 |
 | 2026-10-04 | `Backend` calls are blocking (short CLI invocations); the daemon runs them off its event loop | Claude (R) | Keeps the trait object-safe |
+| 2026-10-04 | State dir `$BATON_HOME`, else `$XDG_STATE_HOME/baton`, else `~/.local/state/baton` (mode 0700): `baton.db`, `daemon.sock`, `daemon.lock` (flock = one daemon per state dir) | Claude (R) | |
+| 2026-10-04 | Socket protocol: one JSON request line and one reply line per connection, 1 MiB cap, 10 s read timeout | Claude (R) | `protocol.rs` |
+| 2026-10-04 | `baton daemon` runs in the foreground; the CLI reports a missing daemon instead of starting one (revisit with the TUI, M1.7) | Claude (R) | |
+| 2026-10-04 | A task may have zero checks; review must then say "no checks" rather than imply verification | Claude (R) | PLAN §6 |
