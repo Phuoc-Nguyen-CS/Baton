@@ -13,13 +13,30 @@ use crate::protocol::{Request, Response};
 /// Hooks run inline with the worker's tool calls; never hold it up for long.
 const DAEMON_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A permission hook waits for the owner (`permission::WAIT`), then a little more
+/// for the reply; the worker's settings give the hook longer still.
+pub const PERMISSION_TIMEOUT: Duration = Duration::from_secs(57);
+
+/// Largest `tool_input` forwarded with a permission request. Larger ones are left
+/// to Claude's own prompt.
+const MAX_TOOL_INPUT: usize = 256 << 10;
+
 /// Handles one event; returns the JSON to print for Claude Code, if any. Without
 /// `paths` the guards still apply; only the report to the daemon is skipped.
 pub fn run(paths: Option<&Paths>, attempt: i64, role: &str, event: &str, stdin: &str) -> Option<Value> {
     let input: Value = serde_json::from_str(stdin).unwrap_or(Value::Null);
     let denied = (event == "PreToolUse").then(|| guard(&input, role)).flatten();
-    let request = Request::Hook { attempt, event: event.into(), input: summarize(&input), denied: denied.clone() };
-    let reply = paths.map(|p| client::call_with_timeout(p, &request, DAEMON_TIMEOUT));
+    let mut summary = summarize(&input);
+    let mut timeout = DAEMON_TIMEOUT;
+    if event == "PermissionRequest" {
+        // Decisions bind to the exact request (PLAN §4), so the input goes whole.
+        if input["tool_input"].to_string().len() <= MAX_TOOL_INPUT {
+            summary["tool_input"] = input["tool_input"].clone();
+        }
+        timeout = PERMISSION_TIMEOUT;
+    }
+    let request = Request::Hook { attempt, event: event.into(), input: summary, denied: denied.clone() };
+    let reply = paths.map(|p| client::call_with_timeout(p, &request, timeout));
     if let Some(reason) = denied {
         return Some(json!({ "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

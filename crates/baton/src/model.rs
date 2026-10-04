@@ -88,13 +88,33 @@ pub struct Task {
     pub created_ms: i64,
 }
 
-/// A task with its latest attempt and candidate, as `status` shows it.
+/// A task with its latest attempt, candidate and open decisions, as `status` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
     #[serde(flatten)]
     pub task: Task,
     pub worker: Option<Worker>,
     pub candidate: Option<Candidate>,
+    /// Pending decisions: what needs the owner.
+    pub decisions: Vec<Decision>,
+}
+
+/// A durable request for the owner (PLAN §4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decision {
+    pub id: i64,
+    pub task_id: Option<i64>,
+    pub attempt_id: Option<i64>,
+    /// permission | review
+    pub kind: String,
+    pub summary: String,
+    pub options: Vec<String>,
+    /// pending | answered | applied | expired | withdrawn
+    pub status: String,
+    pub answer: Option<String>,
+    pub note: Option<String>,
+    pub created_ms: i64,
+    pub answered_ms: Option<i64>,
 }
 
 /// The exact revision Baton verified, with the latest result of each check on it.

@@ -9,10 +9,10 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::json;
 
-use crate::model::{Candidate, CheckResult, Task, TaskState, TaskView, Worker};
+use crate::model::{Candidate, CheckResult, Decision, Task, TaskState, TaskView, Worker};
 
 /// Entry `i` moves the schema from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql")];
 
 pub struct Store {
     conn: Connection,
@@ -120,7 +120,8 @@ impl Store {
                     })
                     .optional()?;
                 let candidate = self.latest_candidate(task.id)?;
-                Ok(TaskView { task, worker, candidate })
+                let decisions = self.pending_decisions(task.id)?;
+                Ok(TaskView { task, worker, candidate, decisions })
             })
             .collect()
     }
@@ -238,6 +239,93 @@ impl Store {
         audit(&tx, "candidate", candidate_id, "checks_invalidated", None)?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn create_decision(&mut self, new: &NewDecision) -> Result<Decision> {
+        let tx = self.transaction()?;
+        tx.execute(
+            "INSERT INTO decision (task_id, attempt_id, kind, request, summary, options, status, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
+            params![
+                new.task_id,
+                new.attempt_id,
+                new.kind,
+                new.request,
+                new.summary,
+                serde_json::to_string(new.options)?,
+                now_ms()
+            ],
+        )?;
+        let id = tx.last_insert_rowid();
+        audit(&tx, "decision", id, "created", Some(&json!({ "kind": new.kind, "task": new.task_id, "attempt": new.attempt_id })))?;
+        let decision = tx.query_row(&format!("{DECISION_SELECT} WHERE id = ?1"), [id], decision_row)?;
+        tx.commit()?;
+        Ok(decision)
+    }
+
+    pub fn decision(&self, id: i64) -> Result<Decision> {
+        self.conn
+            .query_row(&format!("{DECISION_SELECT} WHERE id = ?1"), [id], decision_row)
+            .optional()?
+            .with_context(|| format!("no decision {id}"))
+    }
+
+    /// The newest decision on this attempt for exactly this request that hasn't been applied.
+    pub fn open_decision_for(&self, attempt_id: i64, kind: &str, request: &str) -> Result<Option<Decision>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "{DECISION_SELECT} WHERE attempt_id = ?1 AND kind = ?2 AND request = ?3
+                     AND status IN ('pending', 'answered') ORDER BY id DESC LIMIT 1"
+                ),
+                params![attempt_id, kind, request],
+                decision_row,
+            )
+            .optional()?)
+    }
+
+    pub fn pending_decisions(&self, task_id: i64) -> Result<Vec<Decision>> {
+        let mut stmt = self.conn.prepare(&format!("{DECISION_SELECT} WHERE task_id = ?1 AND status = 'pending' ORDER BY id"))?;
+        let rows = stmt.query_map([task_id], decision_row)?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Records the owner's answer. Repeating the same answer is a no-op; changing
+    /// an answer, or answering with something not offered, is an error.
+    pub fn answer_decision(&mut self, id: i64, answer: &str, note: Option<&str>) -> Result<Decision> {
+        let tx = self.transaction()?;
+        let d = tx
+            .query_row(&format!("{DECISION_SELECT} WHERE id = ?1"), [id], decision_row)
+            .optional()?
+            .with_context(|| format!("no decision {id}"))?;
+        if !d.options.iter().any(|o| o == answer) {
+            bail!("decision {id} takes {}, not {answer:?}", d.options.join(" or "));
+        }
+        match (d.status.as_str(), d.answer.as_deref()) {
+            ("pending", _) => {}
+            (_, Some(previous)) if previous == answer => return Ok(d),
+            (status, previous) => bail!("decision {id} is already {status} ({})", previous.unwrap_or("no answer")),
+        }
+        tx.execute(
+            "UPDATE decision SET status = 'answered', answer = ?1, note = ?2, answered_ms = ?3 WHERE id = ?4",
+            params![answer, note, now_ms(), id],
+        )?;
+        audit(&tx, "decision", id, "answered", Some(&json!({ "answer": answer, "by": "owner" })))?;
+        let d = tx.query_row(&format!("{DECISION_SELECT} WHERE id = ?1"), [id], decision_row)?;
+        tx.commit()?;
+        Ok(d)
+    }
+
+    /// Marks an answered decision as delivered to the worker; false if it wasn't answered.
+    pub fn apply_decision(&mut self, id: i64) -> Result<bool> {
+        let tx = self.transaction()?;
+        let n = tx.execute("UPDATE decision SET status = 'applied' WHERE id = ?1 AND status = 'answered'", [id])?;
+        if n == 1 {
+            audit(&tx, "decision", id, "applied", None)?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
     }
 
     /// Moves the task from `from` to `to`; false, changing nothing, if it has moved on.
@@ -530,6 +618,36 @@ fn session_row(r: &Row) -> rusqlite::Result<Session> {
     })
 }
 
+pub struct NewDecision<'a> {
+    pub task_id: i64,
+    pub attempt_id: i64,
+    pub kind: &'a str,
+    /// Canonical JSON: requests match only when these strings are equal.
+    pub request: &'a str,
+    pub summary: &'a str,
+    pub options: &'a [&'a str],
+}
+
+const DECISION_SELECT: &str = "SELECT id, task_id, attempt_id, kind, summary, options, status, answer, note, created_ms, answered_ms FROM decision";
+
+fn decision_row(r: &Row) -> rusqlite::Result<Decision> {
+    let options: String = r.get(5)?;
+    Ok(Decision {
+        id: r.get(0)?,
+        task_id: r.get(1)?,
+        attempt_id: r.get(2)?,
+        kind: r.get(3)?,
+        summary: r.get(4)?,
+        options: serde_json::from_str(&options)
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(e)))?,
+        status: r.get(6)?,
+        answer: r.get(7)?,
+        note: r.get(8)?,
+        created_ms: r.get(9)?,
+        answered_ms: r.get(10)?,
+    })
+}
+
 const TASK_SELECT: &str = "SELECT id, request_id, repo, base_rev, goal, checks, model, state, state_reason, observed_ms, created_ms FROM task";
 
 fn task_row(r: &Row) -> rusqlite::Result<Task> {
@@ -711,7 +829,7 @@ mod tests {
     #[test]
     fn fresh_store_has_every_table() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         let mut stmt = store
             .conn()
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -736,7 +854,7 @@ mod tests {
             insert_task(store.conn(), "r1").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 1);
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         let n: i64 = store
             .conn()
             .query_row("SELECT count(*) FROM task", [], |r| r.get(0))
@@ -754,6 +872,47 @@ mod tests {
             .unwrap();
         let err = Store::open(&path).err().expect("newer schema must be refused");
         assert!(err.to_string().contains("newer than this baton"), "{err}");
+    }
+
+    #[test]
+    fn a_v1_database_migrates_and_keeps_its_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baton.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            insert_task(&conn, "r1").unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.tasks().unwrap().len(), 1);
+        store.conn().execute("UPDATE decision SET summary = 'x' WHERE 0", []).unwrap();
+    }
+
+    #[test]
+    fn decisions_are_answered_once_and_applied_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (t, _) = store.create_task(&new_task("r1", "first")).unwrap();
+        let (a, _) = begin(&mut store, t.id);
+        let request = r#"{"tool_input":{"command":"npm install"},"tool_name":"Bash"}"#;
+        let new = NewDecision { task_id: t.id, attempt_id: a, kind: "permission", request, summary: "Bash: npm install", options: &["allow", "deny"] };
+        let d = store.create_decision(&new).unwrap();
+        assert_eq!((d.status.as_str(), d.summary.as_str()), ("pending", "Bash: npm install"));
+        assert_eq!(store.pending_decisions(t.id).unwrap().len(), 1);
+        assert_eq!(store.open_decision_for(a, "permission", request).unwrap().unwrap().id, d.id);
+        assert!(store.open_decision_for(a, "permission", r#"{"tool_name":"Bash"}"#).unwrap().is_none(), "only the exact request matches");
+
+        assert!(store.answer_decision(d.id, "maybe", None).unwrap_err().to_string().contains("takes allow or deny"));
+        let answered = store.answer_decision(d.id, "allow", None).unwrap();
+        assert_eq!((answered.status.as_str(), answered.answer.as_deref()), ("answered", Some("allow")));
+        assert_eq!(store.answer_decision(d.id, "allow", None).unwrap(), answered, "same answer again is a no-op");
+        assert!(store.answer_decision(d.id, "deny", None).unwrap_err().to_string().contains("already answered"));
+        assert!(store.pending_decisions(t.id).unwrap().is_empty());
+
+        assert!(store.apply_decision(d.id).unwrap());
+        assert!(!store.apply_decision(d.id).unwrap(), "applied only once");
+        assert!(store.open_decision_for(a, "permission", request).unwrap().is_none());
     }
 
     #[test]

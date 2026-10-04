@@ -47,3 +47,7 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | M1 runs verification inside the scheduler tick, so polling pauses while checks run | Claude (R) | Fine for one worker |
 | 2026-10-04 | M1 spend: Haiku, trivial prompts on the sandbox, ≤30 real sessions for all of M1; ask before exceeding | Owner | Counter in STATUS.md |
 | 2026-10-04 | M1 smoke tests share one state dir, `~/.local/state/baton-smoke`, so task ids (and `baton/<task>` branches) never repeat in the sandbox | Claude (R) | |
+| 2026-10-04 | Schema v1 is frozen (a real smoke DB exists); changes are appended migrations (`schema_v2.sql`: `decision.summary`) | Claude (R) | Replaces "edit v1 in place" |
+| 2026-10-04 | M1 permission policy: auto-allow the task's own check commands and plain read-only commands (ls, cat, head, tail, wc, grep, pwd, echo, stat, file; git status/diff/log/show) with no shell metacharacters, absolute or `..` paths; everything else asks the owner | Claude (R) | D2; per-task policy later |
+| 2026-10-04 | Permission hook: Baton waits 50 s, client 57 s, Claude hook timeout 60 s; a later answer restarts the worker (stop + flag-free resume) only if it's still at the prompt; otherwise it waits for the same request | Claude (R) | F16 |
+| 2026-10-04 | An answer binds to the tool and its exact input minus the free-text `description`, and applies once | Claude (R) | The model rewrites `description` on retry |

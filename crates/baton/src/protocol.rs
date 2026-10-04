@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Task, TaskView};
+use crate::model::{Decision, Task, TaskView};
 
 /// Upper bound for one message line, either direction.
 pub const MAX_MESSAGE: usize = 1 << 20;
@@ -32,6 +32,8 @@ pub enum Request {
         /// Set when `baton hook`'s own guard denied the tool call.
         denied: Option<String>,
     },
+    /// The owner's answer to a pending decision.
+    Decide { id: i64, answer: String, note: Option<String> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,5 +44,7 @@ pub enum Response {
     Status { tasks: Vec<TaskView> },
     /// JSON for `baton hook` to print for Claude Code, if any.
     Hook { output: Option<Value> },
+    /// How the answer reaches the worker.
+    Decided { decision: Decision, delivery: String },
     Error { message: String },
 }

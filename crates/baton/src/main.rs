@@ -49,7 +49,14 @@ enum Cmd {
     /// Show tasks: what needs you, what's progressing, what's ready to review
     Status,
     /// Answer a pending decision
-    Decide { id: i64, answer: String },
+    Decide {
+        id: i64,
+        /// One of the decision's options, e.g. allow or deny
+        answer: String,
+        /// Message for the worker, e.g. why a request was denied
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Entry point for a worker's Claude Code hooks (written into its settings by Baton)
     #[command(hide = true)]
     Hook {
@@ -100,7 +107,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Some(Cmd::Status) => status(cli.json),
         Some(Cmd::Hook { event, attempt, role }) => Ok(run_hook(&event, attempt, &role)),
         None => Ok(not_yet("the TUI", "M1.7")),
-        Some(Cmd::Decide { .. }) => Ok(not_yet("`baton decide`", "M1.4")),
+        Some(Cmd::Decide { id, answer, note }) => decide(id, answer, note, cli.json),
     }
 }
 
@@ -166,6 +173,9 @@ fn status(json: bool) -> Result<ExitCode> {
                 };
                 println!("      attempt {} {} · {session} · {}", w.attempt, w.attempt_state, w.worktree.display());
             }
+            for d in &view.decisions {
+                println!("      needs you: #{} {}: {} → baton decide {} {}", d.id, d.kind, d.summary, d.id, d.options.join("|"));
+            }
             if let Some(c) = &view.candidate {
                 println!("      candidate {} on baton/{}", &c.commit[..12], t.id);
                 for check in &c.checks {
@@ -174,6 +184,18 @@ fn status(json: bool) -> Result<ExitCode> {
                 }
             }
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn decide(id: i64, answer: String, note: Option<String>, json: bool) -> Result<ExitCode> {
+    let Response::Decided { decision, delivery } = client::call(&Paths::from_env()?, &Request::Decide { id, answer, note })? else {
+        bail!("unexpected reply from the daemon");
+    };
+    if json {
+        println!("{}", serde_json::json!({ "decision": decision, "delivery": delivery }));
+    } else {
+        println!("decision {}: {} ({}) — {delivery}", decision.id, decision.answer.as_deref().unwrap_or("?"), decision.summary);
     }
     Ok(ExitCode::SUCCESS)
 }

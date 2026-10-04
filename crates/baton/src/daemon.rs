@@ -22,6 +22,7 @@ use crate::git;
 use crate::paths::Paths;
 use crate::protocol::{MAX_MESSAGE, Request, Response};
 use crate::store::{NewTask, Store};
+use crate::permission::{self, Waiters};
 use crate::worker::{self, Ctx};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -49,6 +50,8 @@ pub fn run(paths: &Paths, kind: BackendKind) -> Result<()> {
         backend,
         backend_name,
         exe: std::env::current_exe()?,
+        waiters: Waiters::default(),
+        permission_wait: permission::WAIT,
     });
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(serve(ctx))
@@ -183,6 +186,8 @@ fn handle(ctx: &Ctx, wake: &Notify, request: Request) -> Response {
         Request::Hook { attempt, event, input, denied } => {
             worker::on_hook(ctx, attempt, &event, &input, denied.as_deref()).map(|output| Response::Hook { output })
         }
+        Request::Decide { id, answer, note } => permission::decide(ctx, id, &answer, note.as_deref())
+            .map(|(decision, delivery)| Response::Decided { decision, delivery: delivery.into() }),
     };
     result.unwrap_or_else(|e| Response::Error { message: format!("{e:#}") })
 }

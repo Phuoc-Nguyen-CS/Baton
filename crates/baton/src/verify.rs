@@ -149,6 +149,8 @@ mod tests {
             backend: Arc::new(FakeBackend::new()),
             backend_name: "fake",
             exe: "/bin/baton".into(),
+            waiters: Default::default(),
+            permission_wait: Duration::from_millis(200),
         };
         let worktree = repo.join(".claude/worktrees/baton-1-1");
         git::add_worktree(&repo, &worktree, "baton/1", &head).unwrap();

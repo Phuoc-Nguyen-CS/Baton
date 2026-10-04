@@ -39,8 +39,21 @@ CHECKS: <commands you ran and their results, or none>
 OPEN: <questions or risks, or none>";
 
 /// The events `baton hook` handles.
-const HOOK_EVENTS: [&str; 7] =
-    ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"];
+const HOOK_EVENTS: [&str; 8] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "Notification",
+    "Stop",
+    "SessionEnd",
+];
+
+/// Seconds Claude gives each hook; a permission hook waits for the owner, so it
+/// gets longer than Baton's own wait plus the reply.
+const HOOK_TIMEOUT: u32 = 30;
+const PERMISSION_HOOK_TIMEOUT: u32 = 60;
 
 /// Native deny rules: enforced by Claude even when Baton's hooks can't run (F2).
 const DENY_RULES: [&str; 2] = ["Bash(git push:*)", "Bash(gh pr:*)"];
@@ -61,7 +74,8 @@ pub fn settings(hook_command: &str) -> Value {
     let hooks: serde_json::Map<String, Value> = HOOK_EVENTS
         .iter()
         .map(|event| {
-            let hook = json!({ "type": "command", "command": format!("{hook_command} {event}"), "timeout": 30 });
+            let timeout = if *event == "PermissionRequest" { PERMISSION_HOOK_TIMEOUT } else { HOOK_TIMEOUT };
+            let hook = json!({ "type": "command", "command": format!("{hook_command} {event}"), "timeout": timeout });
             (event.to_string(), json!([{ "hooks": [hook] }]))
         })
         .collect();
@@ -250,6 +264,10 @@ mod tests {
         assert_eq!(cmd, "BATON_HOME='/h' '/bin/baton' hook --attempt 7 --role baton-worker PreToolUse");
         assert_eq!(s["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
         assert_eq!(s["permissions"]["deny"][0], "Bash(git push:*)");
+        // The hook outlasts Baton's wait and the client's reply timeout.
+        let permission = s["hooks"]["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64().unwrap();
+        assert!(permission > crate::hook::PERMISSION_TIMEOUT.as_secs());
+        assert!(crate::hook::PERMISSION_TIMEOUT > crate::permission::WAIT);
     }
 
     #[test]

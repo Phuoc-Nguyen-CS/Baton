@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -13,6 +14,7 @@ use crate::backend::{Backend, DispatchRequest, Liveness, SessionRef};
 use crate::git;
 use crate::model::{Task, TaskState};
 use crate::paths::Paths;
+use crate::permission::{self, Waiters};
 use crate::store::{NewAttempt, SessionInfo, Store};
 use crate::verify;
 
@@ -24,6 +26,9 @@ pub struct Ctx {
     pub backend_name: &'static str,
     /// The `baton` executable the worker's hooks run.
     pub exe: PathBuf,
+    pub waiters: Waiters,
+    /// How long a permission hook waits for the owner (`permission::WAIT`).
+    pub permission_wait: Duration,
 }
 
 impl Ctx {
@@ -148,10 +153,12 @@ fn poll(ctx: &Ctx) -> Result<()> {
         }
         let at_prompt = waiting_for == Some("permission prompt");
         let state = store.task(s.task_id)?.state;
+        drop(store);
         if at_prompt && state != TaskState::WaitingPermission {
-            store.set_task_state(s.task_id, Some(TaskState::WaitingPermission), "waiting at Claude's permission prompt; attach to answer")?;
+            let reason = permission::waiting_reason(ctx, s.task_id)?;
+            ctx.store().set_task_state(s.task_id, Some(TaskState::WaitingPermission), &reason)?;
         } else if !at_prompt && state == TaskState::WaitingPermission {
-            store.set_task_state(s.task_id, Some(TaskState::Running), "permission prompt answered")?;
+            ctx.store().set_task_state(s.task_id, Some(TaskState::Running), "permission prompt answered")?;
         }
     }
     Ok(())
@@ -239,12 +246,16 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
                 None => activity(&format!("using {tool}"))?,
             }
         }
+        "PermissionRequest" => {
+            let task = ctx.store().task(attempt.task_id)?;
+            return permission::on_request(ctx, &task, &attempt, input);
+        }
         "Notification" => match input["notification_type"].as_str() {
-            Some("permission_prompt") => ctx.store().set_task_state(
-                attempt.task_id,
-                Some(TaskState::WaitingPermission),
-                "waiting at Claude's permission prompt; attach to answer",
-            )?,
+            Some("permission_prompt") => {
+                // Arrives ~6 s into a request, possibly while Baton's hook still waits (F16).
+                let reason = permission::waiting_reason(ctx, attempt.task_id)?;
+                ctx.store().set_task_state(attempt.task_id, Some(TaskState::WaitingPermission), &reason)?;
+            }
             Some("idle_prompt") => activity("worker is idle")?,
             _ => {}
         },
@@ -286,71 +297,9 @@ fn handoff_field<'a>(message: &'a str, field: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::fake::{Call, FakeBackend};
+    use crate::backend::fake::Call;
     use crate::git::tests::git_in;
-    use crate::store::NewTask;
-
-    struct Fixture {
-        ctx: Ctx,
-        fake: Arc<FakeBackend>,
-        repo: PathBuf,
-        head: String,
-        _dirs: (tempfile::TempDir, tempfile::TempDir),
-    }
-
-    fn fixture() -> Fixture {
-        let (home, repos) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let repo = repos.path().canonicalize().unwrap().join("r");
-        fs::create_dir(&repo).unwrap();
-        git_in(&repo, &["init", "-q"]);
-        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
-        let head = git::repo(&repo).unwrap().head;
-        let fake = Arc::new(FakeBackend::new());
-        let ctx = Ctx {
-            paths: Paths { home: home.path().into() },
-            store: Mutex::new(Store::open_in_memory().unwrap()),
-            backend: fake.clone(),
-            backend_name: "fake",
-            exe: "/opt/baton/bin/baton".into(),
-        };
-        Fixture { ctx, fake, repo, head, _dirs: (home, repos) }
-    }
-
-    impl Fixture {
-        fn add_task(&self, goal: &str) -> i64 {
-            let new = NewTask {
-                request_id: goal.into(),
-                repo: self.repo.clone(),
-                base_rev: self.head.clone(),
-                goal: goal.into(),
-                checks: vec!["test -f greeting.txt".into()],
-                model: Some("haiku".into()),
-            };
-            self.ctx.store().create_task(&new).unwrap().0.id
-        }
-
-        fn task(&self, id: i64) -> Task {
-            self.ctx.store().task(id).unwrap()
-        }
-
-        fn worker(&self, id: i64) -> crate::model::Worker {
-            let views = self.ctx.store().task_views().unwrap();
-            views.into_iter().find(|v| v.task.id == id).unwrap().worker.unwrap()
-        }
-
-        fn hook(&self, attempt: i64, event: &str, mut input: Value) -> Option<Value> {
-            input["hook_event_name"] = event.into();
-            on_hook(&self.ctx, attempt, event, &input, None).unwrap()
-        }
-    }
-
-    fn start(session: &str, agent_type: Option<&str>) -> Value {
-        let mut v = json!({ "session_id": format!("{session}-0000-4000-8000-000000000000"), "source": "startup", "model": "claude-haiku-4-5" });
-        if let Some(a) = agent_type {
-            v["agent_type"] = a.into();
-        }
-        v
-    }
+    use crate::testutil::{fixture, start};
 
     #[test]
     fn dispatch_prepares_the_worktree_settings_and_session() {

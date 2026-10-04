@@ -96,11 +96,11 @@ CREATE TABLE decision (
     task_id     INTEGER REFERENCES task(id),
     attempt_id  INTEGER REFERENCES attempt(id),
     kind        TEXT NOT NULL,           -- permission | review
-    request     TEXT NOT NULL,           -- JSON: the exact request (tool + input, or candidate)
+    request     TEXT NOT NULL,           -- canonical JSON: the exact request (tool + input, or candidate)
     options     TEXT NOT NULL,           -- JSON array of allowed answers
-    status      TEXT NOT NULL,           -- pending | answered | expired | withdrawn
+    status      TEXT NOT NULL,           -- pending → answered → applied, or expired | withdrawn
     answer      TEXT,
-    note        TEXT,                    -- owner's message, e.g. requested changes
+    note        TEXT,                    -- owner's message, e.g. a denial reason or requested changes
     created_ms  INTEGER NOT NULL,
     answered_ms INTEGER,
     expires_ms  INTEGER

@@ -226,6 +226,38 @@ fn bad_intake_creates_nothing() {
 }
 
 #[test]
+fn a_permission_hook_waits_for_baton_decide() {
+    let env = Env::new();
+    let (repo, _) = env.repo("r");
+    let _daemon = env.start_daemon();
+    env.json(&["task", "run a script", "--repo", repo.to_str().unwrap(), "--json"]);
+    let task = env.wait_for("dispatch", |t| t["worker"]["session"].is_string());
+    let input = serde_json::json!({
+        "session_id": format!("{}-0000-4000-8000-000000000000", task["worker"]["session"].as_str().unwrap()),
+        "hook_event_name": "PermissionRequest",
+        "agent_type": "baton-worker",
+        "tool_name": "Bash",
+        "tool_input": { "command": "python3 -c 'print(1)'", "description": "print" },
+    });
+
+    let (hook_out, decide_out) = std::thread::scope(|s| {
+        let hook = s.spawn(|| env.hook("PermissionRequest", input));
+        let t = env.wait_for("the decision", |t| t["decisions"].as_array().is_some_and(|d| !d.is_empty()));
+        assert_eq!(t["state"], "waiting_permission");
+        let d = &t["decisions"][0];
+        assert_eq!(d["summary"], "Bash: python3 -c 'print(1)'");
+        let decide = env.baton(&["decide", &d["id"].to_string(), "allow"]);
+        (hook.join().unwrap(), decide)
+    });
+    assert!(decide_out.status.success(), "{}", String::from_utf8_lossy(&decide_out.stderr));
+    assert!(String::from_utf8_lossy(&decide_out.stdout).contains("delivered to the waiting worker"));
+    let out: Value = serde_json::from_str(&hook_out).unwrap();
+    assert_eq!(out["hookSpecificOutput"]["decision"]["behavior"], "allow");
+    let t = env.wait_for("running again", |t| t["state"] == "running");
+    assert_eq!(t["decisions"], serde_json::json!([]));
+}
+
+#[test]
 fn hooks_reach_the_daemon_and_guards_hold_without_it() {
     let env = Env::new();
     let (repo, _) = env.repo("r");
