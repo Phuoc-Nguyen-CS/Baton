@@ -45,3 +45,5 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | Checks: `sh -c` in their own process group, 10 min timeout (whole group killed), daemon's environment, output to `attempts/<task>-<seq>/checks/<id>.log` | Claude (R) | |
 | 2026-10-04 | Handoff `STATUS: blocked` → `waiting_input`; any other `Stop` → verify (a missing handoff is noted, never looped on); failed checks still go to review with the counts, and the owner decides | Claude (R) | PLAN §5 |
 | 2026-10-04 | M1 runs verification inside the scheduler tick, so polling pauses while checks run | Claude (R) | Fine for one worker |
+| 2026-10-04 | M1 spend: Haiku, trivial prompts on the sandbox, ≤30 real sessions for all of M1; ask before exceeding | Owner | Counter in STATUS.md |
+| 2026-10-04 | M1 smoke tests share one state dir, `~/.local/state/baton-smoke`, so task ids (and `baton/<task>` branches) never repeat in the sandbox | Claude (R) | |

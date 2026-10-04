@@ -422,6 +422,16 @@ impl Store {
         Ok(())
     }
 
+    /// Records what a running task's worker is doing. In any other state the reason
+    /// explains that state (e.g. the check counts), so it is left alone.
+    pub fn note_activity(&mut self, task_id: i64, activity: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE task SET state_reason = ?1, observed_ms = ?2 WHERE id = ?3 AND state = ?4",
+            params![activity, now_ms(), task_id, TaskState::Running],
+        )?;
+        Ok(())
+    }
+
     /// Updates the task's state and reason unless it is final; audited when the state changes.
     pub fn set_task_state(&mut self, task_id: i64, state: Option<TaskState>, reason: &str) -> Result<()> {
         let tx = self.transaction()?;

@@ -203,7 +203,7 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
         return Ok(None);
     }
 
-    let activity = |reason: &str| ctx.store().set_task_state(attempt.task_id, None, reason);
+    let activity = |reason: &str| ctx.store().note_activity(attempt.task_id, reason);
     match event {
         "SessionStart" => {
             let expected: Value = serde_json::from_str(&attempt.config)?;
@@ -440,6 +440,11 @@ mod tests {
         assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::ReviewReady, Some("ready for review: 1 of 1 checks passed")));
         let view = f.ctx.store().task_views().unwrap().pop().unwrap();
         assert!(git::is_at(&worktree, &view.candidate.unwrap().commit).unwrap());
+
+        // Activity after the turn doesn't overwrite the review summary.
+        f.hook(1, "SessionEnd", json!({ "session_id": "fake0001-x", "reason": "other" }));
+        assert_eq!(f.task(t).state_reason.as_deref(), Some("ready for review: 1 of 1 checks passed"));
+        assert_eq!(f.worker(t).liveness.as_deref(), Some("not_running"));
 
         // The worker gets new instructions: the task is running again.
         f.hook(1, "UserPromptSubmit", json!({ "session_id": "fake0001-x" }));
