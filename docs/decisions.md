@@ -34,3 +34,9 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | Socket protocol: one JSON request line and one reply line per connection, 1 MiB cap, 10 s read timeout | Claude (R) | `protocol.rs` |
 | 2026-10-04 | `baton daemon` runs in the foreground; the CLI reports a missing daemon instead of starting one (revisit with the TUI, M1.7) | Claude (R) | |
 | 2026-10-04 | A task may have zero checks; review must then say "no checks" rather than imply verification | Claude (R) | PLAN §6 |
+| 2026-10-04 | D1 detail: Baton ignores `.claude/worktrees/` through the repo's `.git/info/exclude`, not by editing the owner's tracked `.gitignore` | Claude (R) | Less invasive than the card's wording; same effect |
+| 2026-10-04 | M1 runs one worker at a time: the next queued task waits until the live attempt ends | Claude (R) | PLAN default is ≤2; M2 raises it |
+| 2026-10-04 | Worker role: tools Read, Write, Edit, Bash, Glob, Grep (no `EnterWorktree`); its prompt carries the rules and a handoff format, since it replaces Claude's system prompt (F12) | Claude (R) | `backend/claude.rs` |
+| 2026-10-04 | `baton hook` always exits 0 (denials go in JSON), reports a summarized payload (no file contents, long text cut) with a 5 s timeout; guards run without the daemon | Claude (R) | D4 |
+| 2026-10-04 | Unknown session ids on an attempt's hooks are copies: Baton stops them; a `SessionStart` role mismatch stops the worker and fails the attempt | Claude (R) | F6, F10 |
+| 2026-10-04 | Tests always run the daemon with `--backend fake`; only explicit smoke tests use `claude` | Claude (R) | After a test briefly hit real `claude --bg` (refused: untrusted temp repo, 0 sessions) |

@@ -2,6 +2,7 @@
 //! through the CLI, restarted gracefully and by SIGKILL.
 
 use std::path::{Path, PathBuf};
+use std::io::Write as _;
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -49,10 +50,40 @@ impl Env {
         (path, head)
     }
 
+    /// Feeds one hook event to `baton hook`, as Claude Code would; returns its stdout.
+    fn hook(&self, event: &str, input: Value) -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_baton"))
+            .env("BATON_HOME", self.home.path())
+            .args(["hook", "--attempt", "1", "--role", "baton-worker", event])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "baton hook must always exit 0");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Polls `status --json` until `done` holds for the first task.
+    fn wait_for(&self, what: &str, done: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = self.json(&["status", "--json"]);
+            if done(&status["tasks"][0]) {
+                return status["tasks"][0].clone();
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}: {status}");
+            sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Never the real backend: tests must not start Claude sessions.
     fn start_daemon(&self) -> Daemon {
         let child = Command::new(env!("CARGO_BIN_EXE_baton"))
             .env("BATON_HOME", self.home.path())
-            .arg("daemon")
+            .args(["daemon", "--backend", "fake"])
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -113,8 +144,12 @@ fn tasks_survive_daemon_restarts() {
     assert_eq!(task["repo"], repo_arg);
     assert_eq!(task["base_rev"], head.as_str());
     assert_eq!(task["checks"], serde_json::json!(["test -f greeting.txt"]));
-    let before = env.json(&["status", "--json"]);
-    assert_eq!(before["tasks"].as_array().unwrap().len(), 1);
+    let dispatched = env.wait_for("dispatch", |t| t["worker"]["session"].is_string());
+    // What a restart must preserve; liveness is re-observed, so it may change.
+    let durable = |t: &Value| {
+        serde_json::json!([t["id"], t["goal"], t["base_rev"], t["state"], t["worker"]["attempt"], t["worker"]["session"], t["worker"]["worktree"]])
+    };
+    let before = durable(&dispatched);
 
     // Graceful stop: the socket goes away and the CLI says so.
     daemon.terminate();
@@ -124,13 +159,13 @@ fn tasks_survive_daemon_restarts() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("daemon isn't running"));
 
     let daemon = env.start_daemon();
-    assert_eq!(env.json(&["status", "--json"]), before);
+    assert_eq!(durable(&env.json(&["status", "--json"])["tasks"][0]), before);
 
     // SIGKILL leaves a stale socket file; the next daemon replaces it.
     daemon.kill();
     assert!(env.paths().socket().exists());
     let _daemon = env.start_daemon();
-    assert_eq!(env.json(&["status", "--json"]), before);
+    assert_eq!(durable(&env.json(&["status", "--json"])["tasks"][0]), before);
 
     // Intake from a linked worktree records the main worktree as the repo.
     let linked = repo.join(".claude/worktrees/w");
@@ -188,4 +223,39 @@ fn bad_intake_creates_nothing() {
     assert!(String::from_utf8_lossy(&empty.stderr).contains("the goal is empty"));
 
     assert_eq!(env.json(&["status", "--json"])["tasks"], serde_json::json!([]));
+}
+
+#[test]
+fn hooks_reach_the_daemon_and_guards_hold_without_it() {
+    let env = Env::new();
+    let (repo, _) = env.repo("r");
+    let daemon = env.start_daemon();
+    env.json(&["task", "add a greeting", "--repo", repo.to_str().unwrap(), "--json"]);
+    let task = env.wait_for("dispatch", |t| t["worker"]["session"].is_string());
+    let session = format!("{}-0000-4000-8000-000000000000", task["worker"]["session"].as_str().unwrap());
+    let event = |name: &str, extra: Value| {
+        let mut input = serde_json::json!({ "session_id": session, "hook_event_name": name, "agent_type": "baton-worker" });
+        input.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        input
+    };
+    let push = event("PreToolUse", serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": "git push origin main" } }));
+
+    assert_eq!(env.hook("SessionStart", event("SessionStart", serde_json::json!({ "source": "startup" }))), "");
+    let t = env.wait_for("SessionStart", |t| t["worker"]["agent_type"] == "baton-worker");
+    assert_eq!(t["state_reason"], "worker session started (startup)");
+
+    let denied: Value = serde_json::from_str(&env.hook("PreToolUse", push.clone())).unwrap();
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+    let t = env.wait_for("the guard's report", |t| t["state_reason"].as_str().unwrap().starts_with("Baton blocked Bash"));
+    assert_eq!(t["state"], "running");
+
+    let stop = event("Stop", serde_json::json!({ "last_assistant_message": "STATUS: done" }));
+    assert_eq!(env.hook("Stop", stop.clone()), "");
+    env.wait_for("Stop", |t| t["worker"]["attempt_state"] == "turn_ended");
+
+    // With the daemon gone, informational events pass silently and guards still deny.
+    daemon.terminate();
+    assert_eq!(env.hook("Stop", stop), "");
+    let denied: Value = serde_json::from_str(&env.hook("PreToolUse", push)).unwrap();
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
 }

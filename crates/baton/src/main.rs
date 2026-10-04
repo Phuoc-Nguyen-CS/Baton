@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use std::io::Read as _;
+
 use anyhow::{Context, Result, bail};
 use baton::client;
-use baton::daemon;
+use baton::daemon::{self, BackendKind};
+use baton::hook;
 use baton::doctor::{self, Level};
 use baton::paths::Paths;
 use baton::protocol::{Request, Response};
@@ -22,7 +25,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the daemon that owns Baton's state (in the foreground)
-    Daemon,
+    Daemon {
+        /// Which agent backend runs workers
+        #[arg(long, value_enum, default_value = "claude")]
+        backend: BackendKind,
+    },
     /// Start a task: one worker in its own worktree, then Baton's own checks
     Task {
         goal: String,
@@ -32,6 +39,9 @@ enum Cmd {
         /// Repository to work in [default: current directory]
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Worker model, e.g. haiku [default: Claude Code's]
+        #[arg(long)]
+        model: Option<String>,
         /// Makes retries safe: a request id never creates a second task [default: random]
         #[arg(long)]
         request_id: Option<String>,
@@ -40,8 +50,17 @@ enum Cmd {
     Status,
     /// Answer a pending decision
     Decide { id: i64, answer: String },
-    /// Entry point for Claude Code hooks
-    Hook { event: String },
+    /// Entry point for a worker's Claude Code hooks (written into its settings by Baton)
+    #[command(hide = true)]
+    Hook {
+        /// Claude Code hook event, e.g. PreToolUse
+        event: String,
+        #[arg(long)]
+        attempt: i64,
+        /// The role the worker must run as
+        #[arg(long)]
+        role: String,
+    },
     /// Check Claude Code, git and the repository before dispatching
     Doctor {
         /// Repository to check [default: current directory]
@@ -64,16 +83,39 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Some(Cmd::Doctor { repo }) => run_doctor(repo, cli.json),
-        Some(Cmd::Daemon) => {
-            daemon::run(&Paths::from_env()?)?;
+        Some(Cmd::Daemon { backend }) => {
+            daemon::run(&Paths::from_env()?, backend)?;
             Ok(ExitCode::SUCCESS)
         }
-        Some(Cmd::Task { goal, checks, repo, request_id }) => task(goal, checks, repo, request_id, cli.json),
+        Some(Cmd::Task { goal, checks, repo, model, request_id }) => {
+            let request = Request::CreateTask {
+                request_id: request_id.map_or_else(client::new_request_id, Ok)?,
+                repo: dir_or_cwd(repo)?,
+                goal,
+                checks,
+                model,
+            };
+            task(&request, cli.json)
+        }
         Some(Cmd::Status) => status(cli.json),
+        Some(Cmd::Hook { event, attempt, role }) => Ok(run_hook(&event, attempt, &role)),
         None => Ok(not_yet("the TUI", "M1.7")),
         Some(Cmd::Decide { .. }) => Ok(not_yet("`baton decide`", "M1.4")),
-        Some(Cmd::Hook { .. }) => Ok(not_yet("`baton hook`", "M1.3")),
     }
+}
+
+/// Always exits 0: exit code 2 would block the worker, and denials go through
+/// the JSON output instead.
+fn run_hook(event: &str, attempt: i64, role: &str) -> ExitCode {
+    let mut stdin = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin) {
+        eprintln!("baton hook: reading stdin: {e}");
+    }
+    let paths = Paths::from_env().inspect_err(|e| eprintln!("baton hook: {e:#}")).ok();
+    if let Some(output) = hook::run(paths.as_ref(), attempt, role, event, &stdin) {
+        println!("{output}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn not_yet(what: &str, slice: &str) -> ExitCode {
@@ -89,14 +131,8 @@ fn dir_or_cwd(dir: Option<PathBuf>) -> Result<PathBuf> {
     dir.canonicalize().with_context(|| format!("resolving {}", dir.display()))
 }
 
-fn task(goal: String, checks: Vec<String>, repo: Option<PathBuf>, request_id: Option<String>, json: bool) -> Result<ExitCode> {
-    let request = Request::CreateTask {
-        request_id: request_id.map_or_else(client::new_request_id, Ok)?,
-        repo: dir_or_cwd(repo)?,
-        goal,
-        checks,
-    };
-    let Response::Task { task, created } = client::call(&Paths::from_env()?, &request)? else {
+fn task(request: &Request, json: bool) -> Result<ExitCode> {
+    let Response::Task { task, created } = client::call(&Paths::from_env()?, request)? else {
         bail!("unexpected reply from the daemon");
     };
     if json {
@@ -117,10 +153,19 @@ fn status(json: bool) -> Result<ExitCode> {
     } else if tasks.is_empty() {
         println!("no tasks");
     } else {
-        for t in &tasks {
+        for view in &tasks {
+            let t = &view.task;
             let repo = t.repo.file_name().unwrap_or_default().to_string_lossy();
             let reason = t.state_reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
             println!("{:>4}  {:<18} {repo}: {}{reason}", t.id, t.state.as_str(), t.goal);
+            if let Some(w) = &view.worker {
+                let session = match (&w.session, &w.liveness) {
+                    (Some(id), Some(l)) => format!("session {id} {l}"),
+                    (Some(id), None) => format!("session {id}"),
+                    _ => "no session yet".into(),
+                };
+                println!("      attempt {} {} · {session} · {}", w.attempt, w.attempt_state, w.worktree.display());
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

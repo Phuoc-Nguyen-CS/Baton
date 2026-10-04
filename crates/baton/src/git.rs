@@ -1,5 +1,7 @@
 //! The few git queries Baton needs, run through the `git` CLI.
 
+use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,6 +20,31 @@ pub fn repo(dir: &Path) -> Result<Repo> {
     let head = output(Command::new("git").arg("-C").arg(dir).args(["rev-parse", "--verify", "-q", "HEAD^{commit}"]))
         .map_err(|_| anyhow!("no commits yet"))?;
     Ok(Repo { main, head })
+}
+
+/// Makes sure git ignores `pattern` in `repo`, probing with the path `probe`. Adds
+/// it to the repo's local exclude file, so the owner's tracked files stay untouched.
+pub fn ensure_ignored(repo: &Path, pattern: &str, probe: &str) -> Result<()> {
+    let status = Command::new("git").arg("-C").arg(repo).args(["check-ignore", "-q", probe]).status()?;
+    match status.code() {
+        Some(0) => return Ok(()),
+        Some(1) => {}
+        _ => bail!("`git check-ignore` failed in {} ({status})", repo.display()),
+    }
+    let common = output(Command::new("git").arg("-C").arg(repo).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]))?;
+    let exclude = PathBuf::from(common).join("info").join("exclude");
+    fs::create_dir_all(exclude.parent().expect("has a parent"))?;
+    let existing = fs::read_to_string(&exclude).unwrap_or_default();
+    let separator = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
+    let mut file = OpenOptions::new().create(true).append(true).open(&exclude)?;
+    writeln!(file, "{separator}{pattern}")?;
+    Ok(())
+}
+
+/// Creates a linked worktree at `path` on a new `branch` starting at `base`.
+pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
+    output(Command::new("git").arg("-C").arg(repo).args(["worktree", "add", "-q", "-b", branch]).arg(path).arg(base))?;
+    Ok(())
 }
 
 /// Parses the first entry of `git worktree list --porcelain`.
@@ -86,5 +113,29 @@ pub(crate) mod tests {
         assert_ne!(l.head, r.head, "head is the asked-about directory's");
 
         assert!(repo(dir.path()).is_err(), "a plain directory isn't a repo");
+    }
+
+    #[test]
+    fn ignoring_uses_the_local_exclude_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("r");
+        std::fs::create_dir(&root).unwrap();
+        git_in(&root, &["init", "-q"]);
+        let exclude = root.join(".git/info/exclude");
+        std::fs::write(&exclude, "# no trailing newline").unwrap();
+
+        ensure_ignored(&root, ".claude/worktrees/", ".claude/worktrees/probe").unwrap();
+        ensure_ignored(&root, ".claude/worktrees/", ".claude/worktrees/probe").unwrap();
+        assert_eq!(std::fs::read_to_string(&exclude).unwrap(), "# no trailing newline\n.claude/worktrees/\n");
+        assert!(!root.join(".gitignore").exists(), "the owner's files stay untouched");
+
+        git_in(&root, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let head = repo(&root).unwrap().head;
+        let wt = root.join(".claude/worktrees/baton-1-1");
+        add_worktree(&root, &wt, "baton/1", &head).unwrap();
+        assert_eq!(repo(&wt).unwrap().head, head);
+        let status = output(Command::new("git").arg("-C").arg(&root).args(["status", "--porcelain"])).unwrap();
+        assert_eq!(status, "", "the worktree doesn't show up in the main checkout");
+        assert!(add_worktree(&root, &root.join(".claude/worktrees/again"), "baton/1", &head).is_err(), "branch exists");
     }
 }

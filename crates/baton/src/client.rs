@@ -14,6 +14,10 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Sends one request; a daemon-side error comes back as `Err`.
 pub fn call(paths: &Paths, request: &Request) -> Result<Response> {
+    call_with_timeout(paths, request, REPLY_TIMEOUT)
+}
+
+pub fn call_with_timeout(paths: &Paths, request: &Request, timeout: Duration) -> Result<Response> {
     let socket = paths.socket();
     let mut stream = UnixStream::connect(&socket).map_err(|e| match e.kind() {
         ErrorKind::NotFound | ErrorKind::ConnectionRefused => anyhow!(
@@ -22,7 +26,8 @@ pub fn call(paths: &Paths, request: &Request) -> Result<Response> {
         ),
         _ => anyhow!(e).context(format!("connecting to {}", socket.display())),
     })?;
-    stream.set_read_timeout(Some(REPLY_TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     let mut line = serde_json::to_vec(request)?;
     line.push(b'\n');
     stream.write_all(&line)?;

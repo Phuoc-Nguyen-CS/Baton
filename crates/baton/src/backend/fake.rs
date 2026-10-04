@@ -1,10 +1,10 @@
 //! Deterministic in-memory backend. It mirrors the Claude behaviours Baton must
 //! handle: the backend assigns ids, and resuming a live session starts a copy.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 
 use super::{Backend, DispatchRequest, Liveness, Observation, Resumed, SessionRef};
 
@@ -25,6 +25,7 @@ struct State {
     counter: u32,
     sessions: Vec<Observation>,
     calls: Vec<Call>,
+    dispatch_error: Option<String>,
 }
 
 impl State {
@@ -76,6 +77,11 @@ impl FakeBackend {
     pub fn calls(&self) -> Vec<Call> {
         self.state.lock().unwrap().calls.clone()
     }
+
+    /// Makes the next dispatch fail with `message`, starting nothing.
+    pub fn fail_next_dispatch(&self, message: &str) {
+        self.state.lock().unwrap().dispatch_error = Some(message.into());
+    }
 }
 
 impl Backend for FakeBackend {
@@ -86,6 +92,9 @@ impl Backend for FakeBackend {
     fn dispatch(&self, req: &DispatchRequest) -> Result<SessionRef> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(Call::Dispatch(req.clone()));
+        if let Some(message) = s.dispatch_error.take() {
+            bail!(message);
+        }
         Ok(s.spawn(Some(req.name.clone()), Some(req.cwd.clone())))
     }
 
@@ -103,7 +112,7 @@ impl Backend for FakeBackend {
         Ok(())
     }
 
-    fn resume(&self, session: &SessionRef, prompt: &str) -> Result<Resumed> {
+    fn resume(&self, session: &SessionRef, _cwd: &Path, prompt: &str) -> Result<Resumed> {
         let mut s = self.state.lock().unwrap();
         s.calls.push(Call::Resume {
             short_id: session.short_id.clone(),
@@ -165,7 +174,7 @@ mod tests {
         b.stop(&s).unwrap();
         assert_eq!(observe(&b, &s.short_id).liveness, Liveness::NotRunning);
 
-        assert_eq!(b.resume(&s, "continue").unwrap(), Resumed::Same(s.clone()));
+        assert_eq!(b.resume(&s, Path::new("/w"), "continue").unwrap(), Resumed::Same(s.clone()));
         let o = observe(&b, &s.short_id);
         assert_eq!(o.liveness, Liveness::Busy);
         assert_ne!(o.pid, pid);
@@ -177,7 +186,7 @@ mod tests {
         let s = b.dispatch(&request("baton-1-1")).unwrap();
         b.set_liveness(&s.short_id, Liveness::Idle, None).unwrap();
 
-        let Resumed::Copy(copy) = b.resume(&s, "continue").unwrap() else {
+        let Resumed::Copy(copy) = b.resume(&s, Path::new("/w"), "continue").unwrap() else {
             panic!("live resume must copy");
         };
         assert_ne!(copy.short_id, s.short_id);
@@ -190,7 +199,7 @@ mod tests {
         let b = FakeBackend::new();
         let ghost = SessionRef { short_id: "nope".into(), uuid: None };
         assert!(b.stop(&ghost).is_err());
-        assert!(b.resume(&ghost, "x").is_err());
+        assert!(b.resume(&ghost, Path::new("/w"), "x").is_err());
         assert_eq!(
             b.calls(),
             [

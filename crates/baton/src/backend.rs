@@ -4,9 +4,10 @@
 //! Calls are blocking: each one is a short CLI invocation, which the daemon runs off
 //! its event loop.
 
+pub mod claude;
 pub mod fake;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
@@ -80,6 +81,7 @@ pub trait Backend: Send + Sync {
     fn dispatch(&self, req: &DispatchRequest) -> Result<SessionRef>;
     fn list(&self) -> Result<Vec<Observation>>;
     fn stop(&self, session: &SessionRef) -> Result<()>;
-    /// Wakes a stopped session with `prompt`, keeping its saved options.
-    fn resume(&self, session: &SessionRef, prompt: &str) -> Result<Resumed>;
+    /// Wakes a stopped session with `prompt`, keeping its saved options. `cwd` is
+    /// the session's worktree: Claude checks trust where it's run (C15).
+    fn resume(&self, session: &SessionRef, cwd: &Path, prompt: &str) -> Result<Resumed>;
 }

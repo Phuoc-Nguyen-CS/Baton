@@ -30,4 +30,9 @@ impl Paths {
     pub fn lock(&self) -> PathBuf {
         self.home.join("daemon.lock")
     }
+
+    /// Baton's own files for one attempt: the worker's settings, its last message.
+    pub fn attempt_dir(&self, task_id: i64, seq: i64) -> PathBuf {
+        self.home.join("attempts").join(format!("{task_id}-{seq}"))
+    }
 }

@@ -12,6 +12,7 @@ CREATE TABLE task (
     base_rev     TEXT NOT NULL,          -- commit the task starts from
     goal         TEXT NOT NULL,
     checks       TEXT NOT NULL,          -- JSON array of acceptance check commands
+    model        TEXT,                   -- worker model; NULL = the backend's default
     state        TEXT NOT NULL,
     state_reason TEXT,
     observed_ms  INTEGER NOT NULL,       -- time of the observation behind `state`
@@ -25,7 +26,7 @@ CREATE TABLE workspace (
     path        TEXT NOT NULL UNIQUE,
     branch      TEXT NOT NULL,
     base_rev    TEXT NOT NULL,
-    state       TEXT NOT NULL,           -- intended → ready → removed
+    state       TEXT NOT NULL,           -- intended → ready (→ removed), or failed
     created_ms  INTEGER NOT NULL
 );
 
@@ -36,7 +37,7 @@ CREATE TABLE attempt (
     seq          INTEGER NOT NULL,       -- 1, 2, … within the task
     workspace_id INTEGER NOT NULL REFERENCES workspace(id),
     config       TEXT NOT NULL,          -- JSON: model, role, settings file, policy refs; immutable
-    state        TEXT NOT NULL,
+    state        TEXT NOT NULL,          -- preparing → dispatching → running ⇄ turn_ended, or failed
     state_reason TEXT,
     observed_ms  INTEGER NOT NULL,
     created_ms   INTEGER NOT NULL,
@@ -55,6 +56,8 @@ CREATE TABLE session (
     name        TEXT,
     origin      TEXT NOT NULL,           -- dispatch | copy
     agent_type  TEXT,                    -- role reported by SessionStart (F6)
+    model       TEXT,                    -- reported by SessionStart at startup
+    transcript  TEXT,                    -- transcript path reported by hooks
     liveness    TEXT,                    -- last polled status: busy | waiting | idle | not_running | unknown
     waiting_for TEXT,
     observed_ms INTEGER NOT NULL,

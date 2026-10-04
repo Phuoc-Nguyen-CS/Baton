@@ -36,6 +36,11 @@ impl TaskState {
         TaskState::Reconciling,
     ];
 
+    /// Final states: nothing observed later changes them.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, TaskState::Accepted | TaskState::Failed | TaskState::Cancelled)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             TaskState::Queued => "queued",
@@ -76,10 +81,32 @@ pub struct Task {
     pub base_rev: String,
     pub goal: String,
     pub checks: Vec<String>,
+    pub model: Option<String>,
     pub state: TaskState,
     pub state_reason: Option<String>,
     pub observed_ms: i64,
     pub created_ms: i64,
+}
+
+/// A task with its latest attempt, as `status` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskView {
+    #[serde(flatten)]
+    pub task: Task,
+    pub worker: Option<Worker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Worker {
+    pub attempt: i64,
+    pub attempt_state: String,
+    pub worktree: PathBuf,
+    pub branch: String,
+    /// The dispatched session's short id, once known.
+    pub session: Option<String>,
+    pub liveness: Option<String>,
+    pub waiting_for: Option<String>,
+    pub agent_type: Option<String>,
 }
 
 #[cfg(test)]
