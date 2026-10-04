@@ -14,6 +14,7 @@ use crate::git;
 use crate::model::{Task, TaskState};
 use crate::paths::Paths;
 use crate::store::{NewAttempt, SessionInfo, Store};
+use crate::verify;
 
 pub struct Ctx {
     pub paths: Paths,
@@ -33,6 +34,7 @@ impl Ctx {
 
 pub fn tick(ctx: &Ctx) -> Result<()> {
     dispatch_next(ctx)?;
+    verify::verify_pending(ctx)?;
     poll(ctx)
 }
 
@@ -221,8 +223,9 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
             }
         }
         "UserPromptSubmit" => {
+            // A new turn: the previous candidate is no longer what the worker is producing.
             let reason = "worker received its instructions";
-            if !ctx.store().transition_attempt(attempt_id, &["turn_ended"], "running", None, reason)? {
+            if !ctx.store().transition_attempt(attempt_id, &["turn_ended"], "running", Some(TaskState::Running), reason)? {
                 activity(reason)?;
             }
         }
@@ -246,12 +249,21 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
             _ => {}
         },
         "Stop" => {
-            if let Some(message) = input["last_assistant_message"].as_str() {
-                let dir = ctx.paths.attempt_dir(attempt.task_id, attempt.seq);
-                fs::create_dir_all(&dir)?;
-                fs::write(dir.join("last-message.txt"), message)?;
-            }
-            ctx.store().transition_attempt(attempt_id, &["dispatching", "running"], "turn_ended", None, "worker finished its turn")?;
+            let message = input["last_assistant_message"].as_str().unwrap_or_default();
+            let dir = ctx.paths.attempt_dir(attempt.task_id, attempt.seq);
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join("last-message.txt"), message)?;
+            // A blocked worker waits for the owner; anything else gets verified,
+            // whatever the worker claims (F15).
+            let (state, reason) = match handoff_field(message, "STATUS") {
+                Some(s) if s.eq_ignore_ascii_case("blocked") => {
+                    let why = handoff_field(message, "OPEN").or(handoff_field(message, "SUMMARY")).unwrap_or("no reason given");
+                    (TaskState::WaitingInput, format!("worker is blocked: {why}"))
+                }
+                Some(_) => (TaskState::Verifying, "worker finished its turn; running checks".to_owned()),
+                None => (TaskState::Verifying, "worker finished without a handoff; running checks".to_owned()),
+            };
+            ctx.store().transition_attempt(attempt_id, &["dispatching", "running"], "turn_ended", Some(state), &reason)?;
         }
         "SessionEnd" => {
             ctx.store().set_liveness(session_row, "not_running", None)?;
@@ -261,6 +273,14 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
         _ => {}
     }
     Ok(None)
+}
+
+/// The value of a `FIELD: value` line in the worker's handoff, if present.
+fn handoff_field<'a>(message: &'a str, field: &str) -> Option<&'a str> {
+    message.lines().rev().find_map(|line| {
+        let (key, value) = line.trim().split_once(':')?;
+        (key.trim() == field).then(|| value.trim()).filter(|v| !v.is_empty())
+    })
 }
 
 #[cfg(test)]
@@ -401,6 +421,50 @@ mod tests {
             .query_row("SELECT count(*) FROM audit WHERE event = 'guard_denied'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(denied, 1);
+    }
+
+    #[test]
+    fn a_finished_turn_is_snapshotted_and_checked() {
+        let f = fixture();
+        let t = f.add_task("add a greeting");
+        tick(&f.ctx).unwrap();
+        f.hook(1, "SessionStart", start("fake0001", Some("baton-worker")));
+        let worktree = f.worker(t).worktree;
+        fs::write(worktree.join("greeting.txt"), "Hello\n").unwrap();
+        let handoff = "Created it.\nSTATUS: done\nSUMMARY: added greeting.txt\nCHANGED: greeting.txt\nCHECKS: none\nOPEN: none";
+        f.hook(1, "Stop", json!({ "session_id": "fake0001-x", "last_assistant_message": handoff }));
+        assert_eq!(f.task(t).state, TaskState::Verifying);
+
+        tick(&f.ctx).unwrap();
+        let task = f.task(t);
+        assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::ReviewReady, Some("ready for review: 1 of 1 checks passed")));
+        let view = f.ctx.store().task_views().unwrap().pop().unwrap();
+        assert!(git::is_at(&worktree, &view.candidate.unwrap().commit).unwrap());
+
+        // The worker gets new instructions: the task is running again.
+        f.hook(1, "UserPromptSubmit", json!({ "session_id": "fake0001-x" }));
+        assert_eq!(f.task(t).state, TaskState::Running);
+    }
+
+    #[test]
+    fn a_blocked_handoff_waits_for_the_owner() {
+        let f = fixture();
+        let t = f.add_task("add a greeting");
+        tick(&f.ctx).unwrap();
+        let handoff = "STATUS: blocked\nSUMMARY: need a decision\nOPEN: which greeting language?";
+        f.hook(1, "Stop", json!({ "session_id": "fake0001-x", "last_assistant_message": handoff }));
+        tick(&f.ctx).unwrap();
+        let task = f.task(t);
+        assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::WaitingInput, Some("worker is blocked: which greeting language?")));
+        assert!(f.ctx.store().latest_candidate(t).unwrap().is_none(), "nothing to verify yet");
+    }
+
+    #[test]
+    fn handoff_fields_come_from_the_last_matching_line() {
+        let m = "STATUS: draft\nwork…\nSTATUS: done\nOPEN:\n";
+        assert_eq!(handoff_field(m, "STATUS"), Some("done"));
+        assert_eq!(handoff_field(m, "OPEN"), None);
+        assert_eq!(handoff_field("no handoff here", "STATUS"), None);
     }
 
     #[test]

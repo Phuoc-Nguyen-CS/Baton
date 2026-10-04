@@ -88,12 +88,32 @@ pub struct Task {
     pub created_ms: i64,
 }
 
-/// A task with its latest attempt, as `status` shows it.
+/// A task with its latest attempt and candidate, as `status` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
     #[serde(flatten)]
     pub task: Task,
     pub worker: Option<Worker>,
+    pub candidate: Option<Candidate>,
+}
+
+/// The exact revision Baton verified, with the latest result of each check on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Candidate {
+    pub id: i64,
+    pub commit: String,
+    pub tree: String,
+    pub checks: Vec<CheckResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub command: String,
+    /// running | passed | failed | error | invalidated
+    pub state: String,
+    pub exit_code: Option<i32>,
+    /// Captured output.
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

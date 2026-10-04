@@ -47,6 +47,38 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
     Ok(())
 }
 
+/// Commits everything in `worktree` (tracked, new and deleted files; ignored ones
+/// stay out) as Baton, skipping the repo's commit hooks. Returns the resulting
+/// HEAD commit and tree; with nothing to commit, HEAD's.
+pub fn snapshot(worktree: &Path, message: &str) -> Result<(String, String)> {
+    let git = || {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(worktree);
+        cmd
+    };
+    output(git().args(["add", "-A"]))?;
+    let staged = git().args(["diff", "--cached", "--quiet"]).status()?;
+    if staged.code() == Some(1) {
+        output(
+            git()
+                .args(["-c", "user.name=Baton", "-c", "user.email=baton@localhost", "-c", "commit.gpgsign=false"])
+                .args(["commit", "-q", "--no-verify", "-m", message]),
+        )?;
+    } else if !staged.success() {
+        bail!("`git diff --cached` failed in {} ({staged})", worktree.display());
+    }
+    let commit = output(git().args(["rev-parse", "HEAD"]))?;
+    let tree = output(git().args(["rev-parse", "HEAD^{tree}"]))?;
+    Ok((commit, tree))
+}
+
+/// Whether `worktree` still holds exactly `commit`: checked out, nothing changed or added.
+pub fn is_at(worktree: &Path, commit: &str) -> Result<bool> {
+    let head = output(Command::new("git").arg("-C").arg(worktree).args(["rev-parse", "HEAD"]))?;
+    let status = output(Command::new("git").arg("-C").arg(worktree).args(["status", "--porcelain"]))?;
+    Ok(head == commit && status.is_empty())
+}
+
 /// Parses the first entry of `git worktree list --porcelain`.
 fn main_worktree(porcelain: &str) -> Result<PathBuf> {
     let mut entry = porcelain.lines().take_while(|l| !l.is_empty());
@@ -137,5 +169,42 @@ pub(crate) mod tests {
         let status = output(Command::new("git").arg("-C").arg(&root).args(["status", "--porcelain"])).unwrap();
         assert_eq!(status, "", "the worktree doesn't show up in the main checkout");
         assert!(add_worktree(&root, &root.join(".claude/worktrees/again"), "baton/1", &head).is_err(), "branch exists");
+    }
+
+    #[test]
+    fn snapshot_commits_everything_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("r");
+        std::fs::create_dir(&root).unwrap();
+        git_in(&root, &["init", "-q"]);
+        std::fs::write(root.join("keep.txt"), "keep\n").unwrap();
+        std::fs::write(root.join("gone.txt"), "gone\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
+        git_in(&root, &["add", "-A"]);
+        git_in(&root, &["commit", "-q", "-m", "init"]);
+        let base = repo(&root).unwrap().head;
+
+        // Nothing changed: the candidate is HEAD.
+        let (commit, _) = snapshot(&root, "baton: candidate").unwrap();
+        assert_eq!(commit, base);
+        assert!(is_at(&root, &commit).unwrap());
+
+        std::fs::write(root.join("keep.txt"), "changed\n").unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("build/out"), "ignored\n").unwrap();
+        assert!(!is_at(&root, &base).unwrap());
+
+        let (commit, tree) = snapshot(&root, "baton: candidate").unwrap();
+        assert_ne!(commit, base);
+        assert!(is_at(&root, &commit).unwrap());
+        let files = output(Command::new("git").arg("-C").arg(&root).args(["ls-tree", "--name-only", &tree])).unwrap();
+        assert_eq!(files, ".gitignore\nkeep.txt\nnew.txt");
+        let author = output(Command::new("git").arg("-C").arg(&root).args(["log", "-1", "--format=%an <%ae>"])).unwrap();
+        assert_eq!(author, "Baton <baton@localhost>");
+
+        std::fs::write(root.join("new.txt"), "edited after the snapshot\n").unwrap();
+        assert!(!is_at(&root, &commit).unwrap(), "a later edit means the worktree no longer holds the candidate");
     }
 }

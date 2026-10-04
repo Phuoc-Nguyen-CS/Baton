@@ -166,6 +166,13 @@ fn status(json: bool) -> Result<ExitCode> {
                 };
                 println!("      attempt {} {} · {session} · {}", w.attempt, w.attempt_state, w.worktree.display());
             }
+            if let Some(c) = &view.candidate {
+                println!("      candidate {} on baton/{}", &c.commit[..12], t.id);
+                for check in &c.checks {
+                    let code = check.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default();
+                    println!("        {:<11} {}{code}", check.state, check.command);
+                }
+            }
         }
     }
     Ok(ExitCode::SUCCESS)

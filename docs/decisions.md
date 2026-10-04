@@ -40,3 +40,8 @@ Settled unless the owner reopens them. Newest last. (R) = reversible, decided by
 | 2026-10-04 | `baton hook` always exits 0 (denials go in JSON), reports a summarized payload (no file contents, long text cut) with a 5 s timeout; guards run without the daemon | Claude (R) | D4 |
 | 2026-10-04 | Unknown session ids on an attempt's hooks are copies: Baton stops them; a `SessionStart` role mismatch stops the worker and fails the attempt | Claude (R) | F6, F10 |
 | 2026-10-04 | Tests always run the daemon with `--backend fake`; only explicit smoke tests use `claude` | Claude (R) | After a test briefly hit real `claude --bg` (refused: untrusted temp repo, 0 sessions) |
+| 2026-10-04 | Checks run in the worker's worktree (keeps build caches); results count only if the worktree still equals the candidate afterwards, else `invalidated`. A clean checkout per candidate is a later option | Claude (R) | PLAN §6 |
+| 2026-10-04 | Snapshot commits are authored `Baton <baton@localhost>`, `--no-verify`, unsigned; with no changes the candidate is HEAD | Claude (R) | |
+| 2026-10-04 | Checks: `sh -c` in their own process group, 10 min timeout (whole group killed), daemon's environment, output to `attempts/<task>-<seq>/checks/<id>.log` | Claude (R) | |
+| 2026-10-04 | Handoff `STATUS: blocked` → `waiting_input`; any other `Stop` → verify (a missing handoff is noted, never looped on); failed checks still go to review with the counts, and the owner decides | Claude (R) | PLAN §5 |
+| 2026-10-04 | M1 runs verification inside the scheduler tick, so polling pauses while checks run | Claude (R) | Fine for one worker |

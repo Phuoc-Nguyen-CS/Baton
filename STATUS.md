@@ -3,8 +3,8 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M1: deliver one reviewable task (PLAN.md §11; architecture in `docs/architecture.md`)
-**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1–M1.2 done; M1.3 code done and fake-tested, real run pending.
-**Next action:** once the owner approves the budget (open decision 1), run one real Haiku worker on the sandbox to verify M1.3 end to end; meanwhile M1.5 (candidate + checks) needs no real sessions.
+**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1, M1.2, M1.5 done; M1.3 code done and fake-tested, real run pending.
+**Next action:** once the owner approves the budget (open decision 1), run one real Haiku worker on the sandbox (verifies M1.3 and M1.5 together); then M1.4. Without the budget, M1.7 (TUI) can proceed on the fake backend.
 
 **M0 summary:** 8 steps, 23 real sessions, findings F1–F20 in `docs/compat-record.md`; spike scripts in `spikes/` double as compatibility tests for Claude Code upgrades.
 
@@ -15,7 +15,7 @@ Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made w
 - [x] **M1.2 Daemon + CLI**: daemon on a Unix socket owns state; `baton task` creates a task; `baton status --json`. Verify: state survives a daemon restart. (Intake only; dispatch, and with it the fake backend, starts in M1.3.)
 - [ ] **M1.3 Claude adapter**: worktree (D1), settings file (hooks, deny rules), inline agent (D3), `claude --bg` dispatch, id parsing, `agents --json` polling; `baton hook <event>` → daemon, with local push and role guards (D4). OTel env + status line moved to M1.6 with their receiver. Verify: one real worker runs a trivial task end to end. *(Code + 40 fake-backend tests done; real run pending.)*
 - [ ] **M1.4 Permissions**: `acceptEdits` + policy hook (D2); out-of-scope requests become decisions; `baton decide <id> allow|deny`; stop + resume recovery with exact-request matching. Verify: allow, deny, and late-answer cases.
-- [ ] **M1.5 Candidate + checks**: on the worker's final `Stop`, snapshot the worktree as a commit on `baton/<task>`, run the check command there, store results against that tree hash; any later change invalidates them. Verify: one passing and one failing check.
+- [x] **M1.5 Candidate + checks**: on the worker's final `Stop`, snapshot the worktree as a commit on `baton/<task>`, run the check command there, store results against that tree hash; any later change invalidates them. Verify: one passing and one failing check. (Fake-backend demo: "1 of 2 checks passed".)
 - [ ] **M1.6 Usage**: OTLP receiver in the daemon (identity stripped) + status-line quota (D6), per attempt. Verify: totals match the transcript.
 - [ ] **M1.7 TUI**: 80×24 and wide layouts answering "what needs me / what's progressing / what's ready to review"; review screen (goal, diff, check evidence, usage); accept / request changes / defer; native attach with terminal restore. Verify: ratatui test-backend snapshots at both sizes + a manual tmux check.
 - [ ] **M1.8 Steer + recover**: "request changes" steers via hooks or stop + resume (D5); daemon start reconciles live attempts (F20). Verify: kill the daemon mid-task, restart, task continues.
@@ -46,3 +46,5 @@ None.
 - 2026-10-04: M0.8 architecture approved by the owner (all ★); M0 closed.
 - 2026-10-04: M1.1 skeleton: `crates/baton` (clap CLI, SQLite schema v1 + audit log, `Backend` trait + fake, `baton doctor`); 13 tests; doctor passes on the sandbox and flags the untrusted `~/scratch` repo.
 - 2026-10-04: M1.2 daemon + CLI: `baton daemon` (Unix socket, single-instance lock), idempotent `baton task`, `baton status [--json]`; 20 tests incl. SIGTERM and SIGKILL restarts of the real binary; demoed on the sandbox.
+- 2026-10-04: M1.3 code (dispatch lifecycle, Claude adapter, `baton hook` guards), fake-tested only.
+- 2026-10-04: M1.5 candidate + checks: `Stop` → snapshot commit on `baton/<task>` → checks in the worktree → `review_ready` with counts; drift invalidates; timeouts kill the process group; 49 tests.

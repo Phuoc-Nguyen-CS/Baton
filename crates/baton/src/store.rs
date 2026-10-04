@@ -9,7 +9,7 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::json;
 
-use crate::model::{Task, TaskState, TaskView, Worker};
+use crate::model::{Candidate, CheckResult, Task, TaskState, TaskView, Worker};
 
 /// Entry `i` moves the schema from version `i` to `i + 1`.
 const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
@@ -119,9 +119,137 @@ impl Store {
                         })
                     })
                     .optional()?;
-                Ok(TaskView { task, worker })
+                let candidate = self.latest_candidate(task.id)?;
+                Ok(TaskView { task, worker, candidate })
             })
             .collect()
+    }
+
+    /// The task's newest candidate with the latest result of each check run on it.
+    pub fn latest_candidate(&self, task_id: i64) -> Result<Option<Candidate>> {
+        let Some((id, commit, tree)) = self
+            .conn
+            .query_row(
+                "SELECT id, commit_sha, tree_sha FROM candidate WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+                [task_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT check_cmd, state, exit_code, artifact FROM verification
+             WHERE id IN (SELECT max(id) FROM verification WHERE candidate_id = ?1 GROUP BY check_cmd)
+             ORDER BY id",
+        )?;
+        let checks = stmt
+            .query_map([id], |r| {
+                Ok(CheckResult {
+                    command: r.get(0)?,
+                    state: r.get(1)?,
+                    exit_code: r.get(2)?,
+                    output: r.get::<_, Option<String>>(3)?.map(PathBuf::from),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Some(Candidate { id, commit, tree, checks }))
+    }
+
+    /// Tasks waiting for Baton's checks whose worker has finished its turn.
+    pub fn tasks_to_verify(&self) -> Result<Vec<(Task, Attempt)>> {
+        let ids: Vec<(i64, i64)> = self
+            .conn
+            .prepare(
+                "SELECT t.id, a.id FROM task t JOIN attempt a ON a.task_id = t.id
+                 WHERE t.state = ?1 AND a.state = 'turn_ended'
+                   AND a.seq = (SELECT max(seq) FROM attempt WHERE task_id = t.id)
+                 ORDER BY t.id",
+            )?
+            .query_map([TaskState::Verifying], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.into_iter().map(|(t, a)| Ok((self.task(t)?, self.attempt(a)?))).collect()
+    }
+
+    /// Records a candidate, reusing the newest one when it is the same commit
+    /// (a verification restarted after a crash).
+    pub fn add_candidate(&mut self, attempt: &Attempt, commit: &str, tree: &str, base_rev: &str) -> Result<i64> {
+        let tx = self.transaction()?;
+        let latest: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, commit_sha FROM candidate WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+                [attempt.task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((id, _)) = latest.filter(|(_, c)| c == commit) {
+            return Ok(id);
+        }
+        tx.execute(
+            "INSERT INTO candidate (task_id, attempt_id, commit_sha, tree_sha, base_rev, branch, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![attempt.task_id, attempt.id, commit, tree, base_rev, attempt.branch, now_ms()],
+        )?;
+        let id = tx.last_insert_rowid();
+        audit(&tx, "candidate", id, "created", Some(&json!({ "task": attempt.task_id, "attempt": attempt.id, "commit": commit, "tree": tree })))?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Marks checks left `running` on a candidate (by a daemon that died) as errors.
+    pub fn interrupt_checks(&mut self, candidate_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE verification SET state = 'error', ended_ms = ?1 WHERE candidate_id = ?2 AND state = 'running'",
+            params![now_ms(), candidate_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn start_check(&mut self, candidate_id: i64, command: &str, env: &serde_json::Value) -> Result<i64> {
+        let tx = self.transaction()?;
+        tx.execute(
+            "INSERT INTO verification (candidate_id, check_cmd, env, state, started_ms) VALUES (?1, ?2, ?3, 'running', ?4)",
+            params![candidate_id, command, env.to_string(), now_ms()],
+        )?;
+        let id = tx.last_insert_rowid();
+        audit(&tx, "verification", id, "started", Some(&json!({ "candidate": candidate_id })))?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn finish_check(&mut self, id: i64, state: &str, exit_code: Option<i32>, output: &Path) -> Result<()> {
+        let tx = self.transaction()?;
+        tx.execute(
+            "UPDATE verification SET state = ?1, exit_code = ?2, artifact = ?3, ended_ms = ?4 WHERE id = ?5",
+            params![state, exit_code, output.to_string_lossy(), now_ms(), id],
+        )?;
+        audit(&tx, "verification", id, state, Some(&json!({ "exit_code": exit_code })))?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Marks a candidate's results as not applying to it: the worktree changed under them.
+    pub fn invalidate_checks(&mut self, candidate_id: i64) -> Result<()> {
+        let tx = self.transaction()?;
+        tx.execute(
+            "UPDATE verification SET state = 'invalidated' WHERE candidate_id = ?1 AND state IN ('passed', 'failed', 'error')",
+            [candidate_id],
+        )?;
+        audit(&tx, "candidate", candidate_id, "checks_invalidated", None)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Moves the task from `from` to `to`; false, changing nothing, if it has moved on.
+    pub fn transition_task(&mut self, task_id: i64, from: TaskState, to: TaskState, reason: &str) -> Result<bool> {
+        let tx = self.transaction()?;
+        let current: TaskState = tx.query_row("SELECT state FROM task WHERE id = ?1", [task_id], |r| r.get(0))?;
+        if current != from {
+            return Ok(false);
+        }
+        update_task(&tx, task_id, Some(to), reason)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// The oldest queued task, unless an attempt is already live: M1 runs one worker at a time.
@@ -210,7 +338,7 @@ impl Store {
     pub fn attempt(&self, attempt_id: i64) -> Result<Attempt> {
         self.conn
             .query_row(
-                "SELECT a.id, a.task_id, a.seq, a.state, a.config, w.path FROM attempt a
+                "SELECT a.id, a.task_id, a.seq, a.state, a.config, w.path, w.branch FROM attempt a
                  JOIN workspace w ON w.id = a.workspace_id WHERE a.id = ?1",
                 [attempt_id],
                 |r| {
@@ -221,6 +349,7 @@ impl Store {
                         state: r.get(3)?,
                         config: r.get(4)?,
                         worktree: PathBuf::from(r.get::<_, String>(5)?),
+                        branch: r.get(6)?,
                     })
                 },
             )
@@ -348,6 +477,7 @@ pub struct Attempt {
     /// JSON, as recorded at intent.
     pub config: String,
     pub worktree: PathBuf,
+    pub branch: String,
 }
 
 #[derive(Debug, Default)]
