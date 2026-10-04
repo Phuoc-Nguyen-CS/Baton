@@ -3,10 +3,10 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M0: prove the boundaries (PLAN.md §3, §11)
-**State:** M0.1–M0.3 done. Results are in `docs/compat-record.md` (findings 8–15; C1–C5, C7, C8 Tested; C9, C11 partly).
-**Next action:** M0.4 permissions spike: `spikes/m0.4-permissions.sh` with a `PermissionRequest` hook that returns allow, deny, and waits past its timeout; plus a `PreToolUse` hook that blocks `git push` and records it.
+**State:** M0.1–M0.4 done. Results are in `docs/compat-record.md` (findings 8–17; C1–C5, C7–C9 Tested; C11 partly).
+**Next action:** M0.5 steering spike: `spikes/m0.5-steering.sh`. Deliver an instruction to an idle and a busy worker, measuring delivery and latency.
 
-**Spike budget:** 13 / 20 real Claude sessions used (Haiku, trivial prompts; ask before exceeding). M0.4–M0.7 likely need ~9 more, so expect to ask for a top-up.
+**Spike budget:** 15 / 30 real Claude sessions used (Haiku, trivial prompts; ask before exceeding).
 
 ## M0 plan (approved 2026-10-04)
 Goal: a compatibility record plus tested answers for every Claude Code primitive M1 depends on. Spikes are throwaway shell scripts in `spikes/`, run against a disposable repo outside this one (`~/projects/baton-sandbox`, trusted by the owner; output in `spikes/out/`, gitignored). No TUI work in M0. See "Findings that change the plan" in `docs/compat-record.md`.
@@ -14,7 +14,7 @@ Goal: a compatibility record plus tested answers for every Claude Code primitive
 - [x] **M0.1 Compat record**: `docs/compat-record.md`, 15 capabilities with Doc/Probed evidence and the spike that will test each.
 - [x] **M0.2 Lifecycle**: `spikes/m0.2-lifecycle.sh`. Resume only flag-free (any flag makes a copy); `--bg` ignores `--session-id`; Baton-made worktrees work and stay uncommitted; `logs` is display-only.
 - [x] **M0.3 Per-session config**: `spikes/m0.3-config.sh`. Agent (inline only) + hooks + MCP + user/project instructions all load on one `--bg` session and come back on flag-free resume; file-based config is re-read on resume; a custom agent needs `ToolSearch` for MCP tools; a `git push` deny rule holds; workers don't report their own failures.
-- [ ] **M0.4 Permissions**: `PermissionRequest` fires in `--bg` and no decision = prompt + `blocked` (seen in M0.3). Still to test: hook returns allow, hook returns deny, hook exceeds its timeout; a `PreToolUse` deny hook as Baton's visible push block.
+- [x] **M0.4 Permissions**: `spikes/m0.4-permissions.sh`. A `PermissionRequest` hook waiting on a Baton inbox gets allow/deny honoured; past its timeout it's killed and the native prompt stays (late answers do nothing); stop + flag-free resume re-asks through the hook; a `PreToolUse` deny hook blocks and records pushes.
 - [ ] **M0.5 Steering**: measure delivery, acknowledgment and latency to an idle and a busy worker via (a) `SendMessage` from another session, (b) Stop-hook `additionalContext`, (c) raw socket post (undocumented, so adapter only). Fallback: `attach`.
 - [ ] **M0.6 Telemetry**: which produce data while detached: OpenTelemetry (console exporter), status line, transcript usage? Missing ≠ zero.
 - [ ] **M0.7 Failure paths**: supervisor killed, cancellation, agent definition missing on resume. (Untrusted folder done in M0.2.)
@@ -33,3 +33,4 @@ None.
 - 2026-10-04: M0.1 compat record. Key findings: respawn ≠ resume; bg sessions auto-push and open draft PRs; cross-session messaging is a documented steering path.
 - 2026-10-04: M0.2 lifecycle spike (7 sessions). Key findings: each repo needs one interactive trust; any flag on `--resume` makes a copy that can edit the original's worktree; Baton should own worktrees.
 - 2026-10-04: M0.3 per-session config spike (6 sessions). Key findings: everything loads together and survives resume; `--agents` inline only; agents need `ToolSearch` for MCP; deny rule blocks push; verify outcomes, don't trust worker replies.
+- 2026-10-04: M0.4 permissions spike (2 sessions). Key findings: Baton can answer permission requests via a bounded hook wait; timeouts fall back to the native prompt; stuck prompts recover via stop + resume.
