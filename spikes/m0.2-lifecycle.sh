@@ -6,8 +6,10 @@
 #   spawn-a    start session A (preassigned --session-id) in the sandbox
 #   observe-a  wait for A, record row, logs, worktrees
 #   stop-a     stop A
-#   resume-a   resume A by UUID with --bg, then resume again while it runs
+#   resume-a   resume A by UUID with --bg plus flags (2.1.289: starts copies)
 #   observe-a2 wait for the resumed sessions, record rows, logs, file contents
+#   resume-plain resume A with no flags (continues A), then again while it runs (copy)
+#   observe <id>...  wait for any sessions, record rows and logs
 #   spawn-b    create a worktree ourselves and dispatch session B inside it
 #   observe-b  wait for B, check for nested worktrees
 #   cleanup    claude rm every session, record what happens to worktrees
@@ -60,7 +62,8 @@ dispatch() {
   out=$(cd "$dir" && claude --bg "$prompt" "$@" 2>&1) && rc=0 || rc=$?
   log "  exit=$rc elapsed_ms=$(( $(ms) - t0 ))"
   printf '%s\n' "$out" | sed 's/^/  | /' | tee -a "$OUT/run.log"
-  DISPATCHED_ID=$(printf '%s\n' "$out" | grep -oE '\b[0-9a-f]{8}\b' | head -1 || true)
+  # the id on the "backgrounded · <id>" line; a "note:" line may name another session first
+  DISPATCHED_ID=$(printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE 'backgrounded · [0-9a-f]{8}' | grep -oE '[0-9a-f]{8}$' || true)
   [[ -n $DISPATCHED_ID ]] || { log "  no session started"; return 1; }
   log "  short id: $DISPATCHED_ID  BUDGET +1"
 }
@@ -73,8 +76,10 @@ spawn-a)
   log "spawn-a: --session-id $uuid"
   dispatch "$SANDBOX" "Create a file named hello.txt containing the line: hi. Then reply with the single word DONE." \
     --name m02-a --session-id "$uuid" --model $MODEL --permission-mode acceptEdits --allowedTools "$ALLOW" || exit 1
-  save A_UUID "$uuid"; save A_ID "$DISPATCHED_ID"
-  log "  row: $(row "$DISPATCHED_ID")"
+  r=$(row "$DISPATCHED_ID"); log "  row: $r"
+  # 2.1.289: --bg warns and ignores --session-id, so take the real one from the row
+  save A_UUID "$(field "$r" sessionId)"; save A_ID "$DISPATCHED_ID"
+  log "  preassigned honored: $([[ $(field "$r" sessionId) == "$uuid" ]] && echo yes || echo NO)"
   ;;
 observe-a)
   log "observe-a: $A_ID"
@@ -114,6 +119,27 @@ observe-a2)
   worktrees
   for f in $(find "$SANDBOX" -name hello.txt 2>/dev/null); do log "  $f:"; sed 's/^/  | /' "$f" | tee -a "$OUT/run.log"; done
   ;;
+resume-plain)
+  # 2.1.289: any flag with --resume starts a copy; only the prompt should continue A itself
+  log "resume-plain: --resume $A_UUID --bg, no flags"
+  dispatch "$SANDBOX" "Reply with the single word PONG." --resume "$A_UUID" || exit 1
+  save A4_ID "$DISPATCHED_ID"
+  log "  continued A under the same id: $([[ $DISPATCHED_ID == "$A_ID" ]] && echo yes || echo NO)"
+  log "resume-plain (while running): --resume $A_UUID --bg, no flags"
+  if dispatch "$SANDBOX" "Reply with the single word PONG2." --resume "$A_UUID"; then
+    save A5_ID "$DISPATCHED_ID"
+  fi
+  ;;
+observe)
+  # observe <id>...: wait for each, record row and logs
+  shift
+  for id in "$@"; do
+    log "observe: $id"
+    wait_state "$id" 'done|blocked|failed|stopped' || true
+    log "  row: $(row "$id")"
+    claude logs "$id" > "$OUT/logs-$id.txt" 2>&1 || true
+  done
+  ;;
 spawn-b)
   # Baton-made worktrees: one inside the repo (where Claude puts its own), one in a
   # sibling directory. A location the trust check refuses starts no session.
@@ -138,7 +164,7 @@ observe-b)
   log "  b.txt files: $(find "$SANDBOX" "$WT_ROOT" -name b.txt 2>/dev/null | tr '\n' ' ')"
   ;;
 cleanup)
-  for id in ${A_ID:-} ${A2_ID:-} ${A3_ID:-} ${ID_baton_b1:-} ${ID_b2:-}; do
+  for id in ${A_ID:-} ${A2_ID:-} ${A3_ID:-} ${A5_ID:-} ${ID_baton_b1:-} ${ID_b2:-}; do
     log "cleanup: claude rm $id"
     claude rm "$id" 2>&1 | sed 's/^/  | /' | tee -a "$OUT/run.log" || true
   done
