@@ -43,6 +43,7 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 17. **A `PreToolUse` deny hook is the visible push block.** Unlike a deny rule, Baton records every attempt; the worker sees the reason, labelled "hook error". (Tested)
 18. **Baton can steer workers with hooks and the CLI alone.** Busy: a `PostToolUse` hook reading Baton's queue delivers at the next tool boundary (wait ≈ the running tool), a `Stop` hook at turn end; the hook's own log is the delivery receipt. Idle: `claude stop` + flag-free resume with the instruction as the prompt (≈2 s to delivery, same session). `SendMessage` also works for both and is near-instant when idle, but needs a Claude session as the sender. Resuming a live idle session is **not** a route: it copies. (Tested)
 19. **Don't read "finished" from `state`.** One idle worker showed `working`, then `blocked`, never `done`. Use `status`, the `Stop` hook, and `Notification` `idle_prompt` (60 s after idle). (Tested)
+20. **Workers outlive the supervisor.** Each background session is its own process: a graceful `--keep-workers` stop or a `kill -9` of the supervisor didn't interrupt a busy worker, and the next `claude agents`/`claude --bg` call started a new supervisor that re-adopted it with the same pid. Baton needn't babysit the supervisor; after any hiccup it re-reads `claude agents --json --all`. (Tested)
 
 ## Capabilities
 
@@ -77,7 +78,7 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 - **Doc:** a supervisor owns sessions; it stops idle processes after ~1 h unless pinned. Shutdown stops sessions: within 48 h they show `failed` and restart from where they left off; after that, `stopped`. Sleep is survived.
 - **Probed:** "Service install is disabled in this version — the daemon runs on demand and exits when the last client disconnects."
 - **Probed (M0.7):** `claude daemon status` also reports `bg workers: <n> running (control.sock), <n> in roster.json`. One supervisor serves every background session on the machine, including the owner's own and this build session.
-- **Tested:** not yet. Stopping or killing the supervisor can end every background session, so it waits for the owner. `CONFIRM=yes spikes/m0.7-failures.sh supervisor` is ready: a sentinel worker, then `daemon stop --any --keep-workers`, an on-demand restart, `kill -9`, and whether the worker survives and finishes.
+- **Tested (2026-10-04, `CONFIRM=yes spikes/m0.7-failures.sh supervisor`, run detached from the build session):** with a sentinel worker busy (4 × `sleep 30`), `claude daemon stop --any --keep-workers` printed `stopped` / "the next `claude agents` or `claude --bg` will start a new one"; the old supervisor took over 1 s to exit; the worker process lived on. The next `claude agents --json` started a new supervisor that listed the worker with the same pid as `working`/`busy`. `kill -9` on that supervisor also left the worker alive, and the next call started a third supervisor that re-adopted it. The worker finished its task (`done`/`idle`). Two unrelated live background sessions (the build session and one of the owner's) survived both with unchanged pids. Machine shutdown not tested.
 - **Fallback:** Baton reconciles from `agents --json --all` on startup; unknown stays unknown.
 
 ### C7 Per-session configuration

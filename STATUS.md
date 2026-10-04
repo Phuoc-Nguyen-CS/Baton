@@ -3,10 +3,10 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M0: prove the boundaries (PLAN.md §3, §11)
-**State:** M0.1–M0.6 done; M0.7 done except the supervisor test. Results are in `docs/compat-record.md` (findings 1–19; C1–C5, C7–C12 Tested; C6 pending).
-**Next action:** the supervisor test was started from the build session (owner's choice, 2026-10-04) and may have ended that session. If its results aren't in `docs/compat-record.md` C6 yet, read `spikes/out/m0.7/run.log` and `spikes/out/m0.7/supervisor.out`, record them, and clean up any leftover `m07-sup` session. Then M0.8: write `docs/architecture.md` (chosen architecture + limitations) with decision cards for the owner.
+**State:** M0.1–M0.7 done. Results are in `docs/compat-record.md` (findings 1–20; C1–C12 and C15 Tested; C13 deferred to M3; C14 is policy).
+**Next action:** M0.8: write `docs/architecture.md` (chosen architecture + known limitations, from findings 1–20) with decision cards for the owner; owner approval closes M0 and opens M1.
 
-**Spike budget:** 22 / 30 real Claude sessions used (Haiku, trivial prompts; ask before exceeding).
+**Spike budget:** 23 / 30 real Claude sessions used (Haiku, trivial prompts; ask before exceeding).
 
 ## M0 plan (approved 2026-10-04)
 Goal: a compatibility record plus tested answers for every Claude Code primitive M1 depends on. Spikes are throwaway shell scripts in `spikes/`, run against a disposable repo outside this one (`~/projects/baton-sandbox`, trusted by the owner; output in `spikes/out/`, gitignored). No TUI work in M0. See "Findings that change the plan" in `docs/compat-record.md`.
@@ -17,7 +17,7 @@ Goal: a compatibility record plus tested answers for every Claude Code primitive
 - [x] **M0.4 Permissions**: `spikes/m0.4-permissions.sh`. A `PermissionRequest` hook waiting on a Baton inbox gets allow/deny honoured; past its timeout it's killed and the native prompt stays (late answers do nothing); stop + flag-free resume re-asks through the hook; a `PreToolUse` deny hook blocks and records pushes.
 - [x] **M0.5 Steering**: `spikes/m0.5-steering.sh`. Busy: `PostToolUse`/`Stop` hooks deliver Baton's queued instruction at the next tool boundary or turn end. Idle: `claude stop` + flag-free resume with the instruction (~2 s). `SendMessage` works for both but needs a Claude sender. Resuming a live idle session makes a copy.
 - [x] **M0.6 Telemetry**: `spikes/m0.6-telemetry.sh`. OTel, transcript and status line agree exactly on tokens/cost while detached; quota only from the status line (refreshes while idle); OTel = per-process deltas, status-line cost = cumulative snapshot; OTel events carry owner identity.
-- [ ] **M0.7 Failure paths**: `spikes/m0.7-failures.sh`. Done: a deleted project agent makes a resumed worker silently widen to default tools (detect via `SessionStart` `agent_type`). Untrusted folder done in M0.2; mid-tool cancellation in M0.4. **Pending:** supervisor stop/kill (owner decision).
+- [x] **M0.7 Failure paths**: `spikes/m0.7-failures.sh`. A deleted project agent makes a resumed worker silently widen to default tools (detect via `SessionStart` `agent_type`). Workers survive a supervisor stop or `kill -9` and get re-adopted by the next one. Untrusted folder done in M0.2; mid-tool cancellation in M0.4.
 - [ ] **M0.8 Write-up**: chosen architecture + known limitations in `docs/architecture.md`; owner approves → M1.
 
 ## Waiting on owner (not blocking)
@@ -37,3 +37,4 @@ None. (Supervisor test: owner chose to run it from the build session; see Next a
 - 2026-10-04: M0.5 steering spike (3 sessions, including the resume test that made a copy). Key findings: Baton can steer with its own hooks + CLI; `SendMessage` is near-instant but needs a Claude sender; `state` is unreliable for "finished".
 - 2026-10-04: M0.6 telemetry spike (2 sessions). Key findings: all usage sources agree while detached; quota only via the status line; mind delta vs cumulative counters and strip identity from OTel.
 - 2026-10-04: M0.7 failure paths, part 1 (2 sessions). Key finding: a deleted project agent silently widens a resumed worker to default tools, with no warning; only `SessionStart` `agent_type` shows it.
+- 2026-10-04: M0.7 supervisor test (1 session, run detached from the build session). Workers outlive a stopped or killed supervisor and are re-adopted; all live sessions survived.
