@@ -15,7 +15,7 @@ use crate::git;
 use crate::model::{Task, TaskState};
 use crate::paths::Paths;
 use crate::permission::{self, Waiters};
-use crate::store::{NewAttempt, SessionInfo, Store};
+use crate::store::{NewAttempt, Next, SessionInfo, Store};
 use crate::verify;
 
 pub struct Ctx {
@@ -46,8 +46,15 @@ pub fn tick(ctx: &Ctx) -> Result<()> {
 /// Starts the next queued task. Each step is recorded before the outside action
 /// it covers, so a crash leaves evidence for reconciliation (PLAN §4).
 fn dispatch_next(ctx: &Ctx) -> Result<()> {
-    let Some(task) = ctx.store().next_to_dispatch()? else {
-        return Ok(());
+    // Bound first: a guard in the match scrutinee would live through the arms.
+    let next = ctx.store().next_to_dispatch()?;
+    let task = match next {
+        Next::Dispatch(task) => task,
+        Next::Busy { task_id } => {
+            let reason = format!("waiting for capacity: task {task_id}'s worker is running (M1 runs one at a time)");
+            return ctx.store().note_queued(&reason);
+        }
+        Next::Idle => return Ok(()),
     };
     let seq = ctx.store().next_attempt_seq(task.id)?;
     let name = format!("baton-{}-{seq}", task.id);
@@ -330,10 +337,18 @@ mod tests {
         assert_eq!(req.role.as_ref().unwrap().name, "baton-worker");
         assert_eq!(req.model.as_deref(), Some("haiku"));
 
-        // One worker at a time: the second task waits.
+        // One worker at a time: the second task waits, and says why.
         tick(&f.ctx).unwrap();
-        assert_eq!(f.task(t2).state, TaskState::Queued);
+        let waiting = f.task(t2);
+        assert_eq!(waiting.state, TaskState::Queued);
+        assert_eq!(waiting.state_reason.as_deref(), Some("waiting for capacity: task 1's worker is running (M1 runs one at a time)"));
         assert_eq!(f.fake.calls().len(), 1);
+
+        // Once the first worker's turn ends, the second task starts.
+        f.hook(1, "Stop", json!({ "session_id": "fake0001-x", "last_assistant_message": "STATUS: blocked\nOPEN: which file?" }));
+        tick(&f.ctx).unwrap();
+        assert_eq!(f.task(t2).state, TaskState::Running);
+        assert_eq!(f.fake.calls().len(), 2);
     }
 
     #[test]

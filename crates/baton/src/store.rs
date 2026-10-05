@@ -340,20 +340,34 @@ impl Store {
         Ok(true)
     }
 
-    /// The oldest queued task, unless an attempt is already live: M1 runs one worker at a time.
-    pub fn next_to_dispatch(&self) -> Result<Option<Task>> {
-        let live: i64 = self.conn.query_row(
-            &format!("SELECT count(*) FROM attempt WHERE state IN {LIVE_ATTEMPT}"),
-            [],
-            |r| r.get(0),
-        )?;
-        if live > 0 {
-            return Ok(None);
+    /// What dispatch should do next. M1 runs one worker at a time; a worker that
+    /// finished its turn is idle and doesn't hold the slot.
+    pub fn next_to_dispatch(&self) -> Result<Next> {
+        let busy: Option<i64> = self
+            .conn
+            .query_row(
+                &format!("SELECT task_id FROM attempt WHERE state IN {BUSY_ATTEMPT} ORDER BY id LIMIT 1"),
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(task_id) = busy {
+            return Ok(Next::Busy { task_id });
         }
         Ok(self
             .conn
             .query_row(&format!("{TASK_SELECT} WHERE state = ?1 ORDER BY id LIMIT 1"), [TaskState::Queued], task_row)
-            .optional()?)
+            .optional()?
+            .map_or(Next::Idle, Next::Dispatch))
+    }
+
+    /// Explains to every queued task why it is still waiting.
+    pub fn note_queued(&mut self, reason: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE task SET state_reason = ?1, observed_ms = ?2 WHERE state = ?3 AND state_reason IS NOT ?1",
+            params![reason, now_ms(), TaskState::Queued],
+        )?;
+        Ok(())
     }
 
     pub fn next_attempt_seq(&self, task_id: i64) -> Result<i64> {
@@ -531,6 +545,16 @@ impl Store {
 
 /// Attempt states in which a worker may be alive.
 const LIVE_ATTEMPT: &str = "('preparing', 'dispatching', 'running', 'turn_ended')";
+
+/// Attempt states that hold the worker slot.
+const BUSY_ATTEMPT: &str = "('preparing', 'dispatching', 'running')";
+
+pub enum Next {
+    Dispatch(Task),
+    /// The slot is taken by this task's worker.
+    Busy { task_id: i64 },
+    Idle,
+}
 
 fn update_task(tx: &Transaction, task_id: i64, state: Option<TaskState>, reason: &str) -> Result<()> {
     let current: TaskState = tx.query_row("SELECT state FROM task WHERE id = ?1", [task_id], |r| r.get(0))?;
@@ -736,22 +760,38 @@ mod tests {
             .unwrap()
     }
 
+    fn next_id(store: &Store) -> Option<i64> {
+        match store.next_to_dispatch().unwrap() {
+            Next::Dispatch(t) => Some(t.id),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn one_live_attempt_at_a_time() {
+    fn one_busy_worker_at_a_time() {
         let mut store = Store::open_in_memory().unwrap();
         let (t1, _) = store.create_task(&new_task("r1", "first")).unwrap();
         let (t2, _) = store.create_task(&new_task("r2", "second")).unwrap();
-        assert_eq!(store.next_to_dispatch().unwrap().unwrap().id, t1.id);
+        let (t3, _) = store.create_task(&new_task("r3", "third")).unwrap();
+        assert_eq!(next_id(&store), Some(t1.id));
 
         let (a1, _) = begin(&mut store, t1.id);
         assert_eq!(store.task(t1.id).unwrap().state, TaskState::Running);
-        assert!(store.next_to_dispatch().unwrap().is_none(), "t1's attempt is live");
+        assert!(matches!(store.next_to_dispatch().unwrap(), Next::Busy { task_id } if task_id == t1.id));
 
         // A transition from the wrong state changes nothing.
         assert!(!store.transition_attempt(a1, &["running"], "turn_ended", None, "x").unwrap());
-        assert!(store.transition_attempt(a1, &["preparing"], "failed", Some(TaskState::Failed), "boom").unwrap());
-        assert_eq!(store.next_to_dispatch().unwrap().unwrap().id, t2.id);
-        assert_eq!(store.next_attempt_seq(t1.id).unwrap(), 2);
+        // A worker that finished its turn is idle: the next task may start.
+        assert!(store.transition_attempt(a1, &["preparing"], "turn_ended", Some(TaskState::ReviewReady), "done").unwrap());
+        assert_eq!(next_id(&store), Some(t2.id));
+
+        let (a2, _) = begin(&mut store, t2.id);
+        store.note_queued("waiting for capacity").unwrap();
+        assert_eq!(store.task(t3.id).unwrap().state_reason.as_deref(), Some("waiting for capacity"));
+        assert_eq!(store.task(t1.id).unwrap().state_reason.as_deref(), Some("done"), "only queued tasks get the note");
+        assert!(store.transition_attempt(a2, &["preparing"], "failed", Some(TaskState::Failed), "boom").unwrap());
+        assert_eq!(next_id(&store), Some(t3.id));
+        assert_eq!(store.next_attempt_seq(t2.id).unwrap(), 2);
     }
 
     #[test]

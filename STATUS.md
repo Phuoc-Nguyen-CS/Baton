@@ -3,8 +3,8 @@
 _Last updated: 2026-10-04_
 
 **Milestone:** M1: deliver one reviewable task (PLAN.md §11; architecture in `docs/architecture.md`)
-**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1, M1.2, M1.3, M1.5 done; first real worker reached review in 9.6 s.
-**Next action:** M1.4 permissions: `PermissionRequest` hook with a bounded wait, policy, decisions, `baton decide`, stop + resume recovery.
+**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1–M1.5 done; real runs 1–2 passed (`docs/m1-smoke.md`).
+**Next action:** M1.6 usage: OTLP receiver in the daemon (identity stripped), status-line quota, per-attempt totals cross-checked against the transcript.
 
 **M0 summary:** 8 steps, 23 real sessions, findings F1–F20 in `docs/compat-record.md`; spike scripts in `spikes/` double as compatibility tests for Claude Code upgrades.
 
@@ -14,7 +14,7 @@ Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made w
 - [x] **M1.1 Skeleton**: cargo workspace, one `baton` binary (clap: `daemon`, `task`, `status`, `decide`, `hook`, `doctor`), SQLite schema for task/attempt/session/workspace/candidate/verification/decision + audit log, `Backend` trait with a fake for tests. `baton doctor` checks `claude --version`, repo trust, git. Verify: `cargo test`, doctor on the sandbox.
 - [x] **M1.2 Daemon + CLI**: daemon on a Unix socket owns state; `baton task` creates a task; `baton status --json`. Verify: state survives a daemon restart. (Intake only; dispatch, and with it the fake backend, starts in M1.3.)
 - [x] **M1.3 Claude adapter**: worktree (D1), settings file (hooks, deny rules), inline agent (D3), `claude --bg` dispatch, id parsing, `agents --json` polling; `baton hook <event>` → daemon, with local push and role guards (D4). OTel env + status line moved to M1.6 with their receiver. Verify: one real worker runs a trivial task end to end. (Real run 1: `review_ready` in 9.6 s.)
-- [ ] **M1.4 Permissions**: `acceptEdits` + policy hook (D2); out-of-scope requests become decisions; `baton decide <id> allow|deny`; stop + resume recovery with exact-request matching. Verify: allow, deny, and late-answer cases.
+- [x] **M1.4 Permissions**: `acceptEdits` + policy hook (D2); out-of-scope requests become decisions; `baton decide <id> allow|deny`; stop + resume recovery with exact-request matching. Verify: allow, deny, and late-answer cases. (Real run 2: all three delivered.)
 - [x] **M1.5 Candidate + checks**: on the worker's final `Stop`, snapshot the worktree as a commit on `baton/<task>`, run the check command there, store results against that tree hash; any later change invalidates them. Verify: one passing and one failing check. (Fake-backend demo: "1 of 2 checks passed".)
 - [ ] **M1.6 Usage**: OTLP receiver in the daemon (identity stripped) + status-line quota (D6), per attempt. Verify: totals match the transcript.
 - [ ] **M1.7 TUI**: 80×24 and wide layouts answering "what needs me / what's progressing / what's ready to review"; review screen (goal, diff, check evidence, usage); accept / request changes / defer; native attach with terminal restore. Verify: ratatui test-backend snapshots at both sizes + a manual tmux check.
@@ -24,7 +24,7 @@ Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made w
 Accepting a task leaves the result on branch `baton/<task>`; merging into the owner's branch stays the owner's action (PLAN §6).
 
 ## Open decisions (owner)
-None. (M1 budget approved 2026-10-04: ≤30 Haiku sessions. Counter: 1 used; log in `docs/m1-smoke.md`.)
+None. (M1 budget approved 2026-10-04: ≤30 Haiku sessions. Counter: 2 used; log in `docs/m1-smoke.md`.)
 
 ## Waiting on owner (not blocking)
 - **Remote backup:** approved, but `gh` isn't installed. Either `sudo apt install gh && gh auth login`, or create an empty private repo on github.com and give me its URL.
@@ -48,3 +48,4 @@ None.
 - 2026-10-04: M1.2 daemon + CLI: `baton daemon` (Unix socket, single-instance lock), idempotent `baton task`, `baton status [--json]`; 20 tests incl. SIGTERM and SIGKILL restarts of the real binary; demoed on the sandbox.
 - 2026-10-04: M1.3 dispatch lifecycle, Claude adapter, `baton hook` guards; real run 1 (1 session): dispatch → hooks (role ok) → `Stop` → candidate → check passed → `review_ready`.
 - 2026-10-04: M1.5 candidate + checks: `Stop` → snapshot commit on `baton/<task>` → checks in the worktree → `review_ready` with counts; drift invalidates; timeouts kill the process group; 49 tests.
+- 2026-10-04: M1.4 permissions: policy + durable decisions + `baton decide`; late answers delivered by stop + flag-free resume and applied to the exact request once; real run 2 (1 session) passed allow, deny and late. Fixed: idle workers held the worker slot; a guard-in-match deadlock.
