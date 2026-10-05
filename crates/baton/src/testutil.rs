@@ -40,6 +40,7 @@ pub fn fixture() -> Fixture {
         exe: "/opt/baton/bin/baton".into(),
         waiters: Waiters::default(),
         permission_wait: Duration::from_millis(300),
+        otlp_endpoint: None,
     };
     Fixture { ctx, fake, repo, head, _dirs: (home, repos) }
 }

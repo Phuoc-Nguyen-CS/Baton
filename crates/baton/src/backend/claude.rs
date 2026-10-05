@@ -69,8 +69,9 @@ pub fn worker_role() -> Role {
     Role { name: WORKER_ROLE.into(), definition: definition.to_string() }
 }
 
-/// The worker's `--settings` file: every hook event runs `<hook_command> <Event>` (D4).
-pub fn settings(hook_command: &str) -> Value {
+/// The worker's `--settings` file: every hook event runs `<hook_command> <Event>`
+/// (D4); the status line forwards quota; telemetry goes to Baton's receiver (D6).
+pub fn settings(hook_command: &str, otlp_endpoint: Option<&str>) -> Value {
     let hooks: serde_json::Map<String, Value> = HOOK_EVENTS
         .iter()
         .map(|event| {
@@ -79,7 +80,23 @@ pub fn settings(hook_command: &str) -> Value {
             (event.to_string(), json!([{ "hooks": [hook] }]))
         })
         .collect();
-    json!({ "hooks": hooks, "permissions": { "deny": DENY_RULES } })
+    // Only the status line has quota, and it refreshes while the worker idles (F7).
+    let status_line = json!({ "type": "command", "command": format!("{hook_command} StatusLine"), "refreshInterval": 5 });
+    let mut settings = json!({ "hooks": hooks, "permissions": { "deny": DENY_RULES }, "statusLine": status_line });
+    if let Some(endpoint) = otlp_endpoint {
+        // As tested in M0.6. Project and local settings can only turn this off (C12).
+        // Baton reads the logs' api_request events; metrics are accepted and ignored.
+        settings["env"] = json!({
+            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+            "OTEL_LOGS_EXPORTER": "otlp",
+            "OTEL_METRICS_EXPORTER": "otlp",
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
+            "OTEL_LOGS_EXPORT_INTERVAL": "2000",
+            "OTEL_METRIC_EXPORT_INTERVAL": "60000",
+        });
+    }
+    settings
 }
 
 pub struct Claude;
@@ -259,7 +276,10 @@ mod tests {
 
     #[test]
     fn settings_route_every_event_and_deny_push() {
-        let s = settings("BATON_HOME='/h' '/bin/baton' hook --attempt 7 --role baton-worker");
+        let s = settings("BATON_HOME='/h' '/bin/baton' hook --attempt 7 --role baton-worker", Some("http://127.0.0.1:47318"));
+        assert_eq!(s["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://127.0.0.1:47318");
+        assert_eq!(s["statusLine"]["command"], "BATON_HOME='/h' '/bin/baton' hook --attempt 7 --role baton-worker StatusLine");
+        assert!(settings("x", None).get("env").is_none(), "no receiver, no telemetry");
         let cmd = s["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(cmd, "BATON_HOME='/h' '/bin/baton' hook --attempt 7 --role baton-worker PreToolUse");
         assert_eq!(s["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());

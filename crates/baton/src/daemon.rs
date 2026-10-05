@@ -22,6 +22,7 @@ use crate::git;
 use crate::paths::Paths;
 use crate::protocol::{MAX_MESSAGE, Request, Response};
 use crate::store::{NewTask, Store};
+use crate::usage;
 use crate::permission::{self, Waiters};
 use crate::worker::{self, Ctx};
 
@@ -44,6 +45,16 @@ pub fn run(paths: &Paths, kind: BackendKind) -> Result<()> {
         BackendKind::Claude => (Arc::new(Claude), "claude"),
         BackendKind::Fake => (Arc::new(FakeBackend::new()), "fake"),
     };
+    // Telemetry is optional: without the receiver, usage shows as unknown.
+    let port = std::env::var("BATON_OTLP_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(usage::DEFAULT_PORT);
+    let receiver = std::net::TcpListener::bind(("127.0.0.1", port))
+        .and_then(|l| l.set_nonblocking(true).map(|()| l))
+        .inspect_err(|e| eprintln!("baton daemon: no telemetry receiver on 127.0.0.1:{port} ({e}); usage will show as unknown"))
+        .ok();
+    let otlp_endpoint = match &receiver {
+        Some(l) => Some(format!("http://{}", l.local_addr()?)),
+        None => None,
+    };
     let ctx = Arc::new(Ctx {
         paths: paths.clone(),
         store: Mutex::new(Store::open(&paths.db())?),
@@ -52,9 +63,15 @@ pub fn run(paths: &Paths, kind: BackendKind) -> Result<()> {
         exe: std::env::current_exe()?,
         waiters: Waiters::default(),
         permission_wait: permission::WAIT,
+        otlp_endpoint,
     });
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(serve(ctx))
+    runtime.block_on(async {
+        if let Some(listener) = receiver {
+            tokio::spawn(usage::serve(tokio::net::TcpListener::from_std(listener)?, ctx.clone()));
+        }
+        serve(ctx).await
+    })
 }
 
 /// Held for the daemon's lifetime, so only one daemon owns a state directory.
@@ -175,7 +192,10 @@ fn handle(ctx: &Ctx, wake: &Notify, request: Request) -> Response {
             version: env!("CARGO_PKG_VERSION").into(),
             pid: std::process::id(),
         }),
-        Request::Status => ctx.store.lock().unwrap().task_views().map(|tasks| Response::Status { tasks }),
+        Request::Status => {
+            let store = ctx.store.lock().unwrap();
+            store.task_views().and_then(|tasks| Ok(Response::Status { tasks, quota: store.quota()? }))
+        }
         Request::CreateTask { request_id, repo, goal, checks, model } => {
             create_task(ctx, request_id, &repo, goal, checks, model).inspect(|r| {
                 if matches!(r, Response::Task { created: true, .. }) {

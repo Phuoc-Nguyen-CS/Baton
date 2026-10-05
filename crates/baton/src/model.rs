@@ -89,7 +89,7 @@ pub struct Task {
 }
 
 /// A task with its latest attempt, candidate and open decisions, as `status` shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskView {
     #[serde(flatten)]
     pub task: Task,
@@ -97,6 +97,50 @@ pub struct TaskView {
     pub candidate: Option<Candidate>,
     /// Pending decisions: what needs the owner.
     pub decisions: Vec<Decision>,
+    /// Across all attempts; `None` means unknown (no telemetry yet), never zero.
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tokens {
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
+impl std::ops::AddAssign for Tokens {
+    fn add_assign(&mut self, o: Tokens) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_read += o.cache_read;
+        self.cache_write += o.cache_write;
+    }
+}
+
+/// Usage from OpenTelemetry `api_request` events (D6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Usage {
+    pub requests: i64,
+    pub tokens: Tokens,
+    /// Claude Code's client-side estimate, not a bill.
+    pub cost_usd: f64,
+    /// When the newest request was made.
+    pub last_ms: i64,
+    /// The same sessions' transcripts, read at their last `Stop`; `None` until
+    /// every session with usage has been read.
+    pub transcript: Option<Tokens>,
+}
+
+/// The account's quota from a worker's status line, with the time it was seen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quota {
+    pub five_hour_pct: Option<f64>,
+    /// Unix seconds.
+    pub five_hour_resets_at: Option<i64>,
+    pub seven_day_pct: Option<f64>,
+    pub seven_day_resets_at: Option<i64>,
+    pub observed_ms: i64,
 }
 
 /// A durable request for the owner (PLAN §4).

@@ -11,5 +11,6 @@ pub mod protocol;
 pub mod store;
 #[cfg(test)]
 mod testutil;
+pub mod usage;
 pub mod verify;
 pub mod worker;

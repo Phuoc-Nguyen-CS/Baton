@@ -122,6 +122,10 @@ fn run_hook(event: &str, attempt: i64, role: &str) -> ExitCode {
     if let Some(output) = hook::run(paths.as_ref(), attempt, role, event, &stdin) {
         println!("{output}");
     }
+    if event == "StatusLine" {
+        // What an attached owner sees at the bottom of the worker's screen.
+        println!("baton · attempt {attempt} · {role}");
+    }
     ExitCode::SUCCESS
 }
 
@@ -152,12 +156,22 @@ fn task(request: &Request, json: bool) -> Result<ExitCode> {
 }
 
 fn status(json: bool) -> Result<ExitCode> {
-    let Response::Status { tasks } = client::call(&Paths::from_env()?, &Request::Status)? else {
+    let Response::Status { tasks, quota } = client::call(&Paths::from_env()?, &Request::Status)? else {
         bail!("unexpected reply from the daemon");
     };
     if json {
-        println!("{}", serde_json::json!({ "tasks": tasks }));
-    } else if tasks.is_empty() {
+        println!("{}", serde_json::json!({ "tasks": tasks, "quota": quota }));
+        return Ok(ExitCode::SUCCESS);
+    }
+    match &quota {
+        Some(q) => {
+            let pct = |p: Option<f64>| p.map_or("?".into(), |p| format!("{p:.0}%"));
+            let age = (baton::store::now_ms() - q.observed_ms) / 1000;
+            println!("quota: 5 h {} · 7 d {} (seen {age} s ago on a worker's status line)", pct(q.five_hour_pct), pct(q.seven_day_pct));
+        }
+        None => println!("quota: unknown (no worker status line seen yet)"),
+    }
+    if tasks.is_empty() {
         println!("no tasks");
     } else {
         for view in &tasks {
@@ -172,6 +186,21 @@ fn status(json: bool) -> Result<ExitCode> {
                     _ => "no session yet".into(),
                 };
                 println!("      attempt {} {} · {session} · {}", w.attempt, w.attempt_state, w.worktree.display());
+                match &view.usage {
+                    Some(u) => {
+                        let t = u.tokens;
+                        let check = match u.transcript {
+                            Some(tr) if tr == t => "transcript agrees",
+                            Some(_) => "transcript differs",
+                            None => "transcript not read yet",
+                        };
+                        println!(
+                            "      usage: {} requests · {} in / {} out / {} cache read / {} cache write · ${:.4} est. ({check})",
+                            u.requests, t.input, t.output, t.cache_read, t.cache_write, u.cost_usd
+                        );
+                    }
+                    None => println!("      usage: unknown (no telemetry yet)"),
+                }
             }
             for d in &view.decisions {
                 println!("      needs you: #{} {}: {} → baton decide {} {}", d.id, d.kind, d.summary, d.id, d.options.join("|"));

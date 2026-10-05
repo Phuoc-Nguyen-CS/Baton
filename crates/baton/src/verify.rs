@@ -151,6 +151,7 @@ mod tests {
             exe: "/bin/baton".into(),
             waiters: Default::default(),
             permission_wait: Duration::from_millis(200),
+            otlp_endpoint: None,
         };
         let worktree = repo.join(".claude/worktrees/baton-1-1");
         git::add_worktree(&repo, &worktree, "baton/1", &head).unwrap();

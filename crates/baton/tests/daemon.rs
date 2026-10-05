@@ -84,6 +84,7 @@ impl Env {
         let child = Command::new(env!("CARGO_BIN_EXE_baton"))
             .env("BATON_HOME", self.home.path())
             .args(["daemon", "--backend", "fake"])
+            .env("BATON_OTLP_PORT", "0")
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
@@ -223,6 +224,67 @@ fn bad_intake_creates_nothing() {
     assert!(String::from_utf8_lossy(&empty.stderr).contains("the goal is empty"));
 
     assert_eq!(env.json(&["status", "--json"])["tasks"], serde_json::json!([]));
+}
+
+#[test]
+fn telemetry_and_the_status_line_reach_status() {
+    let env = Env::new();
+    let (repo, _) = env.repo("r");
+    let _daemon = env.start_daemon();
+    env.json(&["task", "add a greeting", "--repo", repo.to_str().unwrap(), "--json"]);
+    let task = env.wait_for("dispatch", |t| t["worker"]["session"].is_string());
+    assert_eq!(task["usage"], Value::Null, "unknown before any telemetry");
+    let session = format!("{}-0000-4000-8000-000000000000", task["worker"]["session"].as_str().unwrap());
+
+    // The worker's settings point Claude Code's exporter at Baton's receiver.
+    let settings: Value = serde_json::from_slice(&std::fs::read(env.home.path().join("attempts/1-1/settings.json")).unwrap()).unwrap();
+    let endpoint = settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"].as_str().unwrap().to_owned();
+    let attr = |k: &str, v: Value| serde_json::json!({ "key": k, "value": v });
+    let export = serde_json::json!({ "resourceLogs": [{ "scopeLogs": [{ "logRecords": [{
+        "timeUnixNano": "1791152849189000000",
+        "attributes": [
+            attr("event.name", serde_json::json!({ "stringValue": "api_request" })),
+            attr("session.id", serde_json::json!({ "stringValue": session })),
+            attr("user.email", serde_json::json!({ "stringValue": "owner@example.com" })),
+            attr("input_tokens", serde_json::json!({ "intValue": 10 })),
+            attr("output_tokens", serde_json::json!({ "intValue": 209 })),
+            attr("cache_read_tokens", serde_json::json!({ "intValue": 24595 })),
+            attr("cache_creation_tokens", serde_json::json!({ "intValue": 9277 })),
+            attr("cost_usd", serde_json::json!({ "doubleValue": 0.0220685 })),
+            attr("request_id", serde_json::json!({ "stringValue": "req_1" })),
+        ],
+    }] }] }] });
+    let body = export.to_string();
+    for _ in 0..2 {
+        // Sent twice, as an exporter retry would: it counts once.
+        let addr = endpoint.trim_start_matches("http://");
+        let mut conn = std::net::TcpStream::connect(addr).unwrap();
+        write!(conn, "POST /v1/logs HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut reply).unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200 OK"), "{reply}");
+    }
+
+    let status_line = serde_json::json!({ "session_id": session, "agent_type": "baton-worker",
+        "rate_limits": { "five_hour": { "used_percentage": 16, "resets_at": 1791169800 }, "seven_day": { "used_percentage": 13, "resets_at": 1791399600 } } });
+    assert_eq!(env.hook("StatusLine", status_line).trim(), "baton · attempt 1 · baton-worker");
+
+    let transcript = env.home.path().join("transcript.jsonl");
+    let usage = serde_json::json!({ "input_tokens": 10, "output_tokens": 209, "cache_read_input_tokens": 24595, "cache_creation_input_tokens": 9277 });
+    std::fs::write(&transcript, serde_json::json!({ "type": "assistant", "message": { "id": "m1", "usage": usage } }).to_string()).unwrap();
+    let stop = serde_json::json!({ "session_id": session, "agent_type": "baton-worker", "transcript_path": transcript, "last_assistant_message": "STATUS: done" });
+    env.hook("Stop", stop);
+
+    let t = env.wait_for("usage", |t| t["usage"]["transcript"].is_object());
+    assert_eq!(t["usage"]["requests"], 1);
+    assert_eq!(t["usage"]["tokens"], serde_json::json!({ "input": 10, "output": 209, "cache_read": 24595, "cache_write": 9277 }));
+    assert_eq!(t["usage"]["transcript"], t["usage"]["tokens"]);
+    let status = env.json(&["status", "--json"]);
+    assert_eq!(status["quota"]["five_hour_pct"], 16.0);
+    assert!(!status.to_string().contains("owner@example.com"), "identity never reaches Baton's state");
+    let text = String::from_utf8(env.baton(&["status"]).stdout).unwrap();
+    assert!(text.contains("quota: 5 h 16% · 7 d 13%"), "{text}");
+    assert!(text.contains("usage: 1 requests · 10 in / 209 out / 24595 cache read / 9277 cache write · $0.0221 est. (transcript agrees)"), "{text}");
 }
 
 #[test]

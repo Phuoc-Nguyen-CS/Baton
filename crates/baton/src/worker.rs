@@ -12,10 +12,11 @@ use serde_json::{Value, json};
 use crate::backend::claude::{self, PERMISSION_MODE};
 use crate::backend::{Backend, DispatchRequest, Liveness, SessionRef};
 use crate::git;
-use crate::model::{Task, TaskState};
+use crate::model::{Quota, Task, TaskState};
 use crate::paths::Paths;
 use crate::permission::{self, Waiters};
-use crate::store::{NewAttempt, Next, SessionInfo, Store};
+use crate::store::{NewAttempt, Next, SessionInfo, Store, now_ms};
+use crate::usage;
 use crate::verify;
 
 pub struct Ctx {
@@ -29,6 +30,8 @@ pub struct Ctx {
     pub waiters: Waiters,
     /// How long a permission hook waits for the owner (`permission::WAIT`).
     pub permission_wait: Duration,
+    /// Where workers send telemetry; `None` when the receiver isn't running.
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Ctx {
@@ -97,7 +100,7 @@ fn dispatch_next(ctx: &Ctx) -> Result<()> {
         role.name
     );
     fs::create_dir_all(&dir)?;
-    fs::write(&settings, serde_json::to_vec_pretty(&claude::settings(&hook_command))?)?;
+    fs::write(&settings, serde_json::to_vec_pretty(&claude::settings(&hook_command, ctx.otlp_endpoint.as_deref()))?)?;
 
     ctx.store().transition_attempt(attempt, &["preparing"], "dispatching", None, "starting the worker")?;
     let request = DispatchRequest {
@@ -282,6 +285,25 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
                 None => (TaskState::Verifying, "worker finished without a handoff; running checks".to_owned()),
             };
             ctx.store().transition_attempt(attempt_id, &["dispatching", "running"], "turn_ended", Some(state), &reason)?;
+            // Cross-check usage against the transcript; if it can't be read, the
+            // cross-check stays unknown.
+            let path = ctx.store().transcript_path(session_row)?;
+            if let Some(tokens) = path.and_then(|p| usage::transcript_tokens(&p).ok()) {
+                ctx.store().set_transcript_usage(session_row, &tokens)?;
+            }
+        }
+        "StatusLine" => {
+            let limits = &input["rate_limits"];
+            if limits.is_object() {
+                let quota = Quota {
+                    five_hour_pct: limits["five_hour"]["used_percentage"].as_f64(),
+                    five_hour_resets_at: limits["five_hour"]["resets_at"].as_i64(),
+                    seven_day_pct: limits["seven_day"]["used_percentage"].as_f64(),
+                    seven_day_resets_at: limits["seven_day"]["resets_at"].as_i64(),
+                    observed_ms: now_ms(),
+                };
+                ctx.store().set_quota(&quota)?;
+            }
         }
         "SessionEnd" => {
             ctx.store().set_liveness(session_row, "not_running", None)?;

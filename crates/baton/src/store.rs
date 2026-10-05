@@ -9,10 +9,11 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::json;
 
-use crate::model::{Candidate, CheckResult, Decision, Task, TaskState, TaskView, Worker};
+use crate::model::{Candidate, CheckResult, Decision, Quota, Task, TaskState, TaskView, Tokens, Usage, Worker};
+use crate::usage::ApiRequest;
 
 /// Entry `i` moves the schema from version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql")];
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("schema_v2.sql"), include_str!("schema_v3.sql")];
 
 pub struct Store {
     conn: Connection,
@@ -121,7 +122,8 @@ impl Store {
                     .optional()?;
                 let candidate = self.latest_candidate(task.id)?;
                 let decisions = self.pending_decisions(task.id)?;
-                Ok(TaskView { task, worker, candidate, decisions })
+                let usage = self.task_usage(task.id)?;
+                Ok(TaskView { task, worker, candidate, decisions, usage })
             })
             .collect()
     }
@@ -517,6 +519,117 @@ impl Store {
         Ok(())
     }
 
+    /// Records one API request against the session it came from. Requests from
+    /// sessions Baton doesn't know are dropped; a replayed request counts once.
+    /// Returns whether it was new.
+    pub fn record_usage(&mut self, r: &ApiRequest) -> Result<bool> {
+        // Telemetry can arrive before a hook has filled in the UUID; the short id
+        // is its first 8 characters (F11).
+        let short = r.session.get(..8).unwrap_or(&r.session);
+        let session: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM session WHERE uuid = ?1 OR (uuid IS NULL AND short_id = ?2) ORDER BY id LIMIT 1",
+                params![r.session, short],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(session) = session else { return Ok(false) };
+        let t = r.tokens;
+        let n = self.conn.execute(
+            "INSERT OR IGNORE INTO usage (session_id, event_key, model, input, output, cache_read, cache_write, cost_usd, at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![session, r.key, r.model, t.input, t.output, t.cache_read, t.cache_write, r.cost_usd, r.at_ms],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// The task's usage over all its attempts and sessions, or `None` before any
+    /// telemetry arrived.
+    pub fn task_usage(&self, task_id: i64) -> Result<Option<Usage>> {
+        let row = self.conn.query_row(
+            "SELECT count(u.id), sum(u.input), sum(u.output), sum(u.cache_read), sum(u.cache_write), sum(u.cost_usd), max(u.at_ms)
+             FROM usage u JOIN session s ON s.id = u.session_id JOIN attempt a ON a.id = s.attempt_id WHERE a.task_id = ?1",
+            [task_id],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    Tokens {
+                        input: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        output: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        cache_read: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                        cache_write: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    },
+                    r.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+                    r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                ))
+            },
+        )?;
+        let (requests, tokens, cost_usd, last_ms) = row;
+        if requests == 0 {
+            return Ok(None);
+        }
+        // The cross-check counts only when every session with usage was read.
+        let mut stmt = self.conn.prepare(
+            "SELECT s.transcript_usage FROM session s JOIN attempt a ON a.id = s.attempt_id
+             WHERE a.task_id = ?1 AND EXISTS (SELECT 1 FROM usage u WHERE u.session_id = s.id)",
+        )?;
+        let read: Vec<Option<String>> = stmt.query_map([task_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        let transcript = read
+            .into_iter()
+            .map(|json| json.and_then(|j| serde_json::from_str::<Tokens>(&j).ok()))
+            .try_fold(Tokens::default(), |mut sum, t| {
+                sum += t?;
+                Some(sum)
+            });
+        Ok(Some(Usage { requests, tokens, cost_usd, last_ms, transcript }))
+    }
+
+    pub fn set_transcript_usage(&mut self, session_id: i64, tokens: &Tokens) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session SET transcript_usage = ?1 WHERE id = ?2",
+            params![serde_json::to_string(tokens)?, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_quota(&mut self, q: &Quota) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO quota (id, five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, observed_ms)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (id) DO UPDATE SET five_hour_pct = excluded.five_hour_pct, five_hour_resets_at = excluded.five_hour_resets_at,
+               seven_day_pct = excluded.seven_day_pct, seven_day_resets_at = excluded.seven_day_resets_at, observed_ms = excluded.observed_ms",
+            params![q.five_hour_pct, q.five_hour_resets_at, q.seven_day_pct, q.seven_day_resets_at, q.observed_ms],
+        )?;
+        Ok(())
+    }
+
+    pub fn quota(&self) -> Result<Option<Quota>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT five_hour_pct, five_hour_resets_at, seven_day_pct, seven_day_resets_at, observed_ms FROM quota WHERE id = 1",
+                [],
+                |r| {
+                    Ok(Quota {
+                        five_hour_pct: r.get(0)?,
+                        five_hour_resets_at: r.get(1)?,
+                        seven_day_pct: r.get(2)?,
+                        seven_day_resets_at: r.get(3)?,
+                        observed_ms: r.get(4)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// A session's transcript path, as reported by its hooks.
+    pub fn transcript_path(&self, session_id: i64) -> Result<Option<PathBuf>> {
+        let path: Option<String> =
+            self.conn.query_row("SELECT transcript FROM session WHERE id = ?1", [session_id], |r| r.get(0))?;
+        Ok(path.map(PathBuf::from))
+    }
+
     pub fn audit_event(&mut self, entity: &str, entity_id: i64, event: &str, detail: &serde_json::Value) -> Result<()> {
         let tx = self.transaction()?;
         audit(&tx, entity, entity_id, event, Some(detail))?;
@@ -881,7 +994,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             tables,
-            ["attempt", "audit", "candidate", "decision", "session", "task", "verification", "workspace"]
+            ["attempt", "audit", "candidate", "decision", "quota", "session", "task", "usage", "verification", "workspace"]
         );
     }
 
@@ -925,7 +1038,7 @@ mod tests {
             insert_task(&conn, "r1").unwrap();
         }
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len() as i64);
         assert_eq!(store.tasks().unwrap().len(), 1);
         store.conn().execute("UPDATE decision SET summary = 'x' WHERE 0", []).unwrap();
     }
@@ -953,6 +1066,52 @@ mod tests {
         assert!(store.apply_decision(d.id).unwrap());
         assert!(!store.apply_decision(d.id).unwrap(), "applied only once");
         assert!(store.open_decision_for(a, "permission", request).unwrap().is_none());
+    }
+
+    #[test]
+    fn usage_counts_each_request_once_per_task() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (t, _) = store.create_task(&new_task("r1", "first")).unwrap();
+        let (a, _) = begin(&mut store, t.id);
+        assert_eq!(store.task_usage(t.id).unwrap(), None, "no telemetry is unknown, not zero");
+
+        // Dispatch knows only the short id; telemetry carries the full UUID.
+        let (s1, _) = store.upsert_session(a, "claude", &SessionInfo { short_id: "aaaaaaaa".into(), origin: "dispatch", ..Default::default() }).unwrap();
+        let (s2, _) = store
+            .upsert_session(a, "claude", &SessionInfo { short_id: "bbbbbbbb".into(), uuid: Some("bbbbbbbb-2".into()), origin: "copy", ..Default::default() })
+            .unwrap();
+        let request = |session: &str, key: &str, input: i64| ApiRequest {
+            session: session.into(),
+            key: key.into(),
+            model: Some("haiku".into()),
+            tokens: Tokens { input, output: 2, cache_read: 30, cache_write: 4 },
+            cost_usd: 0.01,
+            at_ms: 1000,
+        };
+        assert!(store.record_usage(&request("aaaaaaaa-1", "req_1", 10)).unwrap());
+        assert!(!store.record_usage(&request("aaaaaaaa-1", "req_1", 10)).unwrap(), "a replay counts once");
+        assert!(store.record_usage(&request("bbbbbbbb-2", "req_2", 5)).unwrap(), "copies count too");
+        assert!(!store.record_usage(&request("cccccccc-3", "req_3", 99)).unwrap(), "unknown sessions are dropped");
+
+        let u = store.task_usage(t.id).unwrap().unwrap();
+        assert_eq!((u.requests, u.tokens, u.transcript), (2, Tokens { input: 15, output: 4, cache_read: 60, cache_write: 8 }, None));
+        assert!((u.cost_usd - 0.02).abs() < 1e-9);
+
+        // The cross-check appears only once every session with usage has been read.
+        store.set_transcript_usage(s1, &Tokens { input: 10, output: 2, cache_read: 30, cache_write: 4 }).unwrap();
+        assert_eq!(store.task_usage(t.id).unwrap().unwrap().transcript, None);
+        store.set_transcript_usage(s2, &Tokens { input: 5, output: 2, cache_read: 30, cache_write: 4 }).unwrap();
+        assert_eq!(store.task_usage(t.id).unwrap().unwrap().transcript, Some(u.tokens));
+    }
+
+    #[test]
+    fn quota_keeps_the_latest_snapshot() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.quota().unwrap(), None);
+        let q = |pct: f64, at: i64| Quota { five_hour_pct: Some(pct), five_hour_resets_at: Some(1), seven_day_pct: None, seven_day_resets_at: None, observed_ms: at };
+        store.set_quota(&q(16.0, 1)).unwrap();
+        store.set_quota(&q(17.0, 2)).unwrap();
+        assert_eq!(store.quota().unwrap(), Some(q(17.0, 2)));
     }
 
     #[test]

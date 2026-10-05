@@ -105,7 +105,10 @@ fn git_subcommand<'a>(rest: &[&'a str]) -> Option<&'a str> {
 /// What the daemon needs from a hook input. File contents and tool output stay
 /// behind; long text is cut, so messages stay small (PLAN §10).
 fn summarize(input: &Value) -> Value {
-    const FIELDS: [&str; 12] = [
+    const FIELDS: [&str; 14] = [
+        // Status line: quota and the session's cost snapshot (C12).
+        "rate_limits",
+        "context_window",
         "session_id",
         "transcript_path",
         "agent_type",
