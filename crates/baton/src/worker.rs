@@ -2,20 +2,21 @@
 //! act on hook events. Backend calls block, so callers run these off the event loop.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::backend::claude::{self, PERMISSION_MODE};
-use crate::backend::{Backend, DispatchRequest, Liveness, SessionRef};
+use crate::backend::{Backend, DispatchRequest, Liveness, Resumed, SessionRef};
 use crate::git;
 use crate::model::{Quota, Task, TaskState};
 use crate::paths::Paths;
 use crate::permission::{self, Waiters};
-use crate::store::{NewAttempt, Next, SessionInfo, Store, now_ms};
+use crate::store::{Attempt, NewAttempt, Next, SessionInfo, Store, now_ms};
 use crate::usage;
 use crate::verify;
 
@@ -280,20 +281,7 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
         },
         "Stop" => {
             let message = input["last_assistant_message"].as_str().unwrap_or_default();
-            let dir = ctx.paths.attempt_dir(attempt.task_id, attempt.seq);
-            fs::create_dir_all(&dir)?;
-            fs::write(dir.join("last-message.txt"), message)?;
-            // A blocked worker waits for the owner; anything else gets verified,
-            // whatever the worker claims (F15).
-            let (state, reason) = match handoff_field(message, "STATUS") {
-                Some(s) if s.eq_ignore_ascii_case("blocked") => {
-                    let why = handoff_field(message, "OPEN").or(handoff_field(message, "SUMMARY")).unwrap_or("no reason given");
-                    (TaskState::WaitingInput, format!("worker is blocked: {why}"))
-                }
-                Some(_) => (TaskState::Verifying, "worker finished its turn; running checks".to_owned()),
-                None => (TaskState::Verifying, "worker finished without a handoff; running checks".to_owned()),
-            };
-            ctx.store().transition_attempt(attempt_id, &["dispatching", "running"], "turn_ended", Some(state), &reason)?;
+            end_turn(ctx, &attempt, message, "")?;
             // Cross-check usage against the transcript; if it can't be read, the
             // cross-check stays unknown.
             let path = ctx.store().transcript_path(session_row)?;
@@ -322,6 +310,116 @@ pub fn on_hook(ctx: &Ctx, attempt_id: i64, event: &str, input: &Value, denied: O
         _ => {}
     }
     Ok(None)
+}
+
+/// The worker's turn ended: keeps its handoff, then a blocked worker waits for the
+/// owner and anything else gets verified, whatever the worker claims (F15).
+fn end_turn(ctx: &Ctx, attempt: &Attempt, message: &str, note: &str) -> Result<()> {
+    let dir = ctx.paths.attempt_dir(attempt.task_id, attempt.seq);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("last-message.txt"), message)?;
+    let (state, reason) = match handoff_field(message, "STATUS") {
+        Some(s) if s.eq_ignore_ascii_case("blocked") => {
+            let why = handoff_field(message, "OPEN").or(handoff_field(message, "SUMMARY")).unwrap_or("no reason given");
+            (TaskState::WaitingInput, format!("worker is blocked: {why}"))
+        }
+        Some(_) => (TaskState::Verifying, "worker finished its turn; running checks".to_owned()),
+        None => (TaskState::Verifying, "worker finished without a handoff; running checks".to_owned()),
+    };
+    let reason = format!("{reason}{note}");
+    ctx.store().transition_attempt(attempt.id, &["dispatching", "running"], "turn_ended", Some(state), &reason)?;
+    Ok(())
+}
+
+/// How long `restart` waits for a stopped worker's process to go.
+const STOP_WAIT: Duration = Duration::from_secs(15);
+
+/// Wakes the same worker session with `prompt` (D5, F18): stops it if it's alive,
+/// waits for the process to go, then resumes flag-free. Resuming a live session
+/// would start a copy, which can write into the worktree (F9, F10).
+pub fn restart(ctx: &Ctx, session: &SessionRef, cwd: &Path, prompt: &str) -> Result<()> {
+    let running = || -> Result<bool> {
+        Ok(ctx.backend.list()?.iter().any(|o| o.session.short_id == session.short_id && o.liveness.is_running()))
+    };
+    if running()? {
+        ctx.backend.stop(session)?;
+        let deadline = Instant::now() + STOP_WAIT;
+        while running()? {
+            if Instant::now() >= deadline {
+                bail!("worker {} didn't stop", session.short_id);
+            }
+            sleep(Duration::from_millis(250));
+        }
+    }
+    match ctx.backend.resume(session, cwd, prompt)? {
+        Resumed::Same(_) => Ok(()),
+        Resumed::Copy(copy) => {
+            ctx.backend.stop(&copy)?;
+            bail!("resuming {} started a copy ({}), which Baton stopped", session.short_id, copy.short_id)
+        }
+    }
+}
+
+/// On daemon start, settles attempts whose worker may have moved on while Baton
+/// was down and its hooks went unheard (architecture §4, F20). Fails if the
+/// backend can't be listed; the scheduler retries before starting anything new.
+pub fn reconcile(ctx: &Ctx) -> Result<()> {
+    const NOTE: &str = " (found after a daemon restart)";
+    let attempts = ctx.store().busy_attempts()?;
+    if attempts.is_empty() {
+        return Ok(());
+    }
+    let observed = ctx.backend.list()?;
+    for attempt in attempts {
+        if attempt.state == "preparing" {
+            let reason = "Baton stopped while preparing the worker; no worker was started";
+            ctx.store().transition_attempt(attempt.id, &["preparing"], "failed", Some(TaskState::Failed), reason)?;
+            continue;
+        }
+        let config: Value = serde_json::from_str(&attempt.config)?;
+        let name = config["name"].as_str().unwrap_or_default();
+        let dispatched = ctx.store().sessions(attempt.id)?.into_iter().find(|s| s.origin == "dispatch");
+        let obs = observed.iter().find(|o| match &dispatched {
+            Some(s) => o.session.short_id == s.short_id,
+            None => o.name.as_deref() == Some(name),
+        });
+        let mut session_row = dispatched.map(|s| s.id);
+        if attempt.state == "dispatching" {
+            // `claude --bg` may have started the worker before Baton recorded it.
+            let Some(o) = obs else {
+                let reason = format!("Baton stopped while starting the worker, and no worker named {name} exists");
+                ctx.store().transition_attempt(attempt.id, &["dispatching"], "failed", Some(TaskState::Failed), &reason)?;
+                continue;
+            };
+            let info = SessionInfo {
+                short_id: o.session.short_id.clone(),
+                uuid: o.session.uuid.clone(),
+                name: Some(name.to_owned()),
+                origin: "dispatch",
+                ..Default::default()
+            };
+            session_row = Some(ctx.store().upsert_session(attempt.id, ctx.backend_name, &info)?.0);
+            let reason = format!("worker started{NOTE}");
+            ctx.store().transition_attempt(attempt.id, &["dispatching"], "running", Some(TaskState::Running), &reason)?;
+        }
+        match obs.map(|o| &o.liveness) {
+            // Still working: its hooks and polling carry on from here.
+            Some(Liveness::Busy | Liveness::Waiting) => {}
+            Some(Liveness::Unknown(state)) => {
+                eprintln!("baton daemon: the worker of attempt {} reports {state:?}; leaving it as it is", attempt.id);
+            }
+            // Idle, stopped or gone: its turn ended unheard. Verify what it left.
+            Some(Liveness::Idle | Liveness::NotRunning) | None => {
+                let transcript = match session_row {
+                    Some(id) => ctx.store().transcript_path(id)?,
+                    None => None,
+                };
+                let message = transcript.and_then(|p| usage::transcript_last_text(&p).ok().flatten()).unwrap_or_default();
+                end_turn(ctx, &attempt, &message, NOTE)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The value of a `FIELD: value` line in the worker's handoff, if present.
@@ -557,5 +655,79 @@ mod tests {
         tick(&f.ctx).unwrap();
         let task = f.task(t);
         assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::Running, Some("permission prompt answered")));
+    }
+
+    #[test]
+    fn a_restart_verifies_a_turn_that_ended_unheard() {
+        let f = fixture();
+        let t = f.add_task("add a greeting");
+        tick(&f.ctx).unwrap();
+        let transcript = f.ctx.paths.home.join("t.jsonl");
+        let mut input = start("fake0001", Some("baton-worker"));
+        input["transcript_path"] = json!(transcript);
+        f.hook(1, "SessionStart", input);
+        // While Baton is down the worker finishes; its Stop hook reaches no one.
+        fs::write(f.worker(t).worktree.join("greeting.txt"), "Hello\n").unwrap();
+        let entry = json!({ "type": "assistant", "message": { "content": [{ "type": "text", "text": "STATUS: done\nSUMMARY: added it" }] } });
+        fs::write(&transcript, entry.to_string()).unwrap();
+        f.fake.set_liveness("fake0001", Liveness::Idle, None).unwrap();
+
+        reconcile(&f.ctx).unwrap();
+        let task = f.task(t);
+        assert_eq!(task.state, TaskState::Verifying);
+        assert_eq!(task.state_reason.as_deref(), Some("worker finished its turn; running checks (found after a daemon restart)"));
+        let message = fs::read_to_string(f.ctx.paths.attempt_dir(t, 1).join("last-message.txt")).unwrap();
+        assert_eq!(message, "STATUS: done\nSUMMARY: added it");
+        tick(&f.ctx).unwrap();
+        assert_eq!(f.task(t).state, TaskState::ReviewReady);
+    }
+
+    #[test]
+    fn a_restart_leaves_working_workers_alone_and_verifies_vanished_ones() {
+        let f = fixture();
+        let t = f.add_task("add a greeting");
+        tick(&f.ctx).unwrap();
+        f.hook(1, "SessionStart", start("fake0001", Some("baton-worker")));
+        reconcile(&f.ctx).unwrap();
+        assert_eq!(f.task(t).state_reason.as_deref(), Some("worker session started (startup)"), "busy: nothing to settle");
+
+        // Gone without a word (e.g. the machine restarted): check what it left.
+        f.fake.stop(&SessionRef { short_id: "fake0001".into(), uuid: None }).unwrap();
+        reconcile(&f.ctx).unwrap();
+        let task = f.task(t);
+        assert_eq!(task.state, TaskState::Verifying);
+        assert_eq!(task.state_reason.as_deref(), Some("worker finished without a handoff; running checks (found after a daemon restart)"));
+    }
+
+    #[test]
+    fn a_restart_settles_attempts_caught_mid_dispatch() {
+        let f = fixture();
+        let begin = |task_id: i64, to: &str| {
+            let name = format!("baton-{task_id}-1");
+            let worktree = f.repo.join(".claude/worktrees").join(&name);
+            let config = json!({ "name": name, "role": "baton-worker" });
+            let new = NewAttempt { task_id, seq: 1, worktree: &worktree, branch: "b", base_rev: &f.head, config: &config };
+            let (attempt, _) = f.ctx.store().begin_attempt(&new).unwrap();
+            if to == "dispatching" {
+                f.ctx.store().transition_attempt(attempt, &["preparing"], "dispatching", None, "starting the worker").unwrap();
+            }
+            (attempt, name, worktree)
+        };
+        let (preparing, dispatched, lost) = (f.add_task("one"), f.add_task("two"), f.add_task("three"));
+        begin(preparing, "preparing");
+        let (_, name, cwd) = begin(dispatched, "dispatching");
+        begin(lost, "dispatching");
+        // `claude --bg` started this worker, but Baton died before recording it.
+        let request = DispatchRequest { name, cwd, prompt: "p".into(), model: None, role: None, settings: None };
+        f.fake.dispatch(&request).unwrap();
+
+        reconcile(&f.ctx).unwrap();
+        assert_eq!(f.task(preparing).state, TaskState::Failed);
+        let task = f.task(dispatched);
+        assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::Running, Some("worker started (found after a daemon restart)")));
+        assert_eq!(f.worker(dispatched).session.as_deref(), Some("fake0001"));
+        let task = f.task(lost);
+        assert_eq!(task.state, TaskState::Failed);
+        assert_eq!(task.state_reason.as_deref(), Some("Baton stopped while starting the worker, and no worker named baton-3-1 exists"));
     }
 }

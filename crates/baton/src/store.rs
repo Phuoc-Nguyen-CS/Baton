@@ -470,6 +470,16 @@ impl Store {
         id.map(|id| self.attempt(id)).transpose()
     }
 
+    /// Attempts that hold the worker slot: the ones a daemon restart must settle.
+    pub fn busy_attempts(&self) -> Result<Vec<Attempt>> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(&format!("SELECT id FROM attempt WHERE state IN {BUSY_ATTEMPT} ORDER BY id"))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        ids.into_iter().map(|id| self.attempt(id)).collect()
+    }
+
     /// Records a session seen for an attempt, filling in whatever is newly known.
     /// Returns the row id and whether the session is new.
     pub fn upsert_session(&mut self, attempt_id: i64, backend: &str, s: &SessionInfo) -> Result<(i64, bool)> {

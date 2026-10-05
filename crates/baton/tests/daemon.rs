@@ -177,6 +177,29 @@ fn tasks_survive_daemon_restarts() {
 }
 
 #[test]
+fn a_task_continues_after_the_daemon_is_killed() {
+    let env = Env::new();
+    let (repo, _) = env.repo("r");
+    let daemon = env.start_daemon();
+    env.json(&["task", "add a greeting", "--check", "test -f greeting.txt", "--repo", repo.to_str().unwrap(), "--json"]);
+    let task = env.wait_for("dispatch", |t| t["worker"]["session"].is_string());
+    let worktree = PathBuf::from(task["worker"]["worktree"].as_str().unwrap());
+    let session = format!("{}-0000-4000-8000-000000000000", task["worker"]["session"].as_str().unwrap());
+
+    // The worker outlives the daemon (F20) and keeps working.
+    daemon.kill();
+    std::fs::write(worktree.join("greeting.txt"), "Hello\n").unwrap();
+    let _daemon = env.start_daemon();
+    let t = env.wait_for("reconcile", |t| t["state"] == "running");
+    assert_eq!(t["worker"]["session"], task["worker"]["session"], "the same worker, not a new one");
+
+    let stop = serde_json::json!({ "session_id": session, "hook_event_name": "Stop", "agent_type": "baton-worker", "last_assistant_message": "STATUS: done" });
+    assert_eq!(env.hook("Stop", stop), "");
+    let t = env.wait_for("review", |t| t["state"] == "review_ready");
+    assert_eq!(t["state_reason"], "ready for review: 1 of 1 checks passed");
+}
+
+#[test]
 fn a_request_id_creates_at_most_one_task() {
     let env = Env::new();
     let (repo, _) = env.repo("r");

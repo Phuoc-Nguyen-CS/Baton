@@ -44,7 +44,7 @@ pub fn run(paths: &Paths, kind: BackendKind) -> Result<()> {
     let _lock = lock(paths)?;
     let (backend, backend_name): (Arc<dyn Backend>, &'static str) = match kind {
         BackendKind::Claude => (Arc::new(Claude), "claude"),
-        BackendKind::Fake => (Arc::new(FakeBackend::new()), "fake"),
+        BackendKind::Fake => (Arc::new(FakeBackend::persistent(paths.home.join("fake-backend.json"))?), "fake"),
     };
     // Telemetry is optional: without the receiver, usage shows as unknown.
     let port = std::env::var("BATON_OTLP_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(usage::DEFAULT_PORT);
@@ -138,6 +138,16 @@ async fn serve(ctx: Arc<Ctx>) -> Result<()> {
 async fn schedule(ctx: Arc<Ctx>, wake: Arc<Notify>) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // Settle what happened while no daemon was listening before starting anything new.
+    loop {
+        interval.tick().await;
+        let c = ctx.clone();
+        match tokio::task::spawn_blocking(move || worker::reconcile(&c)).await {
+            Ok(Ok(())) => break,
+            Ok(Err(e)) => eprintln!("baton daemon: reconciling after start, will retry: {e:#}"),
+            Err(e) => eprintln!("baton daemon: reconciling failed: {e}"),
+        }
+    }
     loop {
         tokio::select! {
             _ = interval.tick() => {}

@@ -11,8 +11,8 @@ use crate::backend::SessionRef;
 use crate::git;
 use crate::model::{Task, TaskDetail, TaskState};
 use crate::protocol::Verdict;
-use crate::store::NewDecision;
-use crate::worker::Ctx;
+use crate::store::{Attempt, NewDecision};
+use crate::worker::{self, Ctx};
 
 const MAX_PATCH: usize = 256 << 10;
 const MAX_MESSAGE: usize = 64 << 10;
@@ -65,8 +65,12 @@ pub fn review(ctx: &Ctx, task_id: i64, verdict: Verdict, seen: Option<&str>, not
     let answer = match verdict {
         Verdict::Accept => "accept",
         Verdict::Defer => "defer",
-        Verdict::Changes => bail!("requesting changes arrives in M1.8; for now attach to the worker with `claude attach`"),
+        Verdict::Changes => "changes",
     };
+    let note = note.map(str::trim).filter(|n| !n.is_empty());
+    if verdict == Verdict::Changes && note.is_none() {
+        bail!("say what to change: --note \"<what to change>\"");
+    }
     if verdict == Verdict::Accept && !git::is_at(&attempt.worktree, &candidate.commit)? {
         bail!("the worktree no longer matches candidate {short}; wait for Baton to verify the new state");
     }
@@ -82,7 +86,6 @@ pub fn review(ctx: &Ctx, task_id: i64, verdict: Verdict, seen: Option<&str>, not
         options: &["accept", "changes", "defer"],
     })?;
     store().answer_decision(decision.id, answer, note)?;
-    store().apply_decision(decision.id)?;
 
     let outcome = match verdict {
         Verdict::Accept => {
@@ -98,12 +101,37 @@ pub fn review(ctx: &Ctx, task_id: i64, verdict: Verdict, seen: Option<&str>, not
             }
             format!("{reason} (`git merge {}`)", attempt.branch)
         }
-        _ => {
+        Verdict::Changes => request_changes(ctx, &attempt, short, note.unwrap_or_default())?,
+        Verdict::Defer => {
             store().set_task_state(task_id, None, "deferred by the owner")?;
             "deferred; the task stays ready for review".to_owned()
         }
     };
+    store().apply_decision(decision.id)?;
     Ok((store().task(task_id)?, outcome))
+}
+
+/// Sends the owner's changes to the idle worker by stop + flag-free resume (D5).
+/// Its next `Stop` brings a new candidate, which Baton checks again.
+fn request_changes(ctx: &Ctx, attempt: &Attempt, short: &str, note: &str) -> Result<String> {
+    let store = || ctx.store.lock().unwrap();
+    let sessions = store().sessions(attempt.id)?;
+    let s = sessions.iter().find(|s| s.origin == "dispatch").context("the worker has no session to resume")?;
+    let session = SessionRef { short_id: s.short_id.clone(), uuid: s.uuid.clone() };
+    // Recorded first: the attempt holds the worker slot from here (PLAN §4).
+    let reason = format!("owner requested changes to {short}; restarting the worker");
+    if !store().transition_attempt(attempt.id, &["turn_ended"], "running", Some(TaskState::Running), &reason)? {
+        bail!("the worker isn't idle (attempt is {}); try again when its turn ends", attempt.state);
+    }
+    let prompt = format!(
+        "Baton: the owner reviewed your result and requests changes:\n\n{note}\n\nMake them in this directory, then end your turn with the handoff as before. Baton runs the acceptance checks again."
+    );
+    if let Err(e) = worker::restart(ctx, &session, &attempt.worktree, &prompt) {
+        let reason = format!("couldn't send the changes to the worker: {e:#}");
+        store().transition_attempt(attempt.id, &["running"], "turn_ended", Some(TaskState::ReviewReady), &reason)?;
+        return Err(e.context("couldn't send the changes to the worker"));
+    }
+    Ok(format!("sent your changes to worker {}; Baton checks its next result", session.short_id))
 }
 
 #[cfg(test)]
@@ -165,5 +193,33 @@ mod tests {
         let (task, _) = review(&f.ctx, t, Verdict::Defer, None, Some("after lunch")).unwrap();
         assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::ReviewReady, Some("deferred by the owner")));
         assert_eq!(f.ctx.store.lock().unwrap().decision(1).unwrap().note.as_deref(), Some("after lunch"));
+    }
+
+    #[test]
+    fn changes_wake_the_same_worker_and_bring_a_new_candidate() {
+        let (f, t) = reviewable();
+        let first = f.ctx.store.lock().unwrap().latest_candidate(t).unwrap().unwrap().commit;
+        assert!(review(&f.ctx, t, Verdict::Changes, None, Some("  ")).unwrap_err().to_string().contains("say what to change"));
+        f.fake.set_liveness("fake0001", crate::backend::Liveness::Idle, None).unwrap();
+
+        let (task, outcome) = review(&f.ctx, t, Verdict::Changes, Some(&first[..12]), Some("say hello in French")).unwrap();
+        assert_eq!(task.state, TaskState::Running);
+        assert_eq!(outcome, "sent your changes to worker fake0001; Baton checks its next result");
+        let calls = f.fake.calls();
+        let [.., Call::Stop(stopped), Call::Resume { short_id, prompt }] = calls.as_slice() else { panic!("{calls:?}") };
+        assert_eq!((stopped.as_str(), short_id.as_str()), ("fake0001", "fake0001"), "stopped first, so the resume isn't a copy");
+        assert!(prompt.contains("requests changes:\n\nsay hello in French"), "{prompt}");
+        let d = f.ctx.store.lock().unwrap().decision(1).unwrap();
+        assert_eq!((d.status.as_str(), d.answer.as_deref()), ("applied", Some("changes")));
+
+        // The resumed worker's next turn is snapshotted and checked again.
+        f.hook(1, "UserPromptSubmit", json!({ "session_id": "fake0001-x" }));
+        fs::write(f.worker(t).worktree.join("greeting.txt"), "Bonjour\n").unwrap();
+        f.hook(1, "Stop", json!({ "session_id": "fake0001-x", "last_assistant_message": "STATUS: done" }));
+        tick(&f.ctx).unwrap();
+        assert_eq!(f.task(t).state, TaskState::ReviewReady);
+        let second = f.ctx.store.lock().unwrap().latest_candidate(t).unwrap().unwrap().commit;
+        assert_ne!(first, second);
+        assert!(detail(&f.ctx, t).unwrap().patch.contains("+Bonjour"));
     }
 }

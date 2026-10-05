@@ -34,14 +34,14 @@ pub struct Role {
 }
 
 /// A backend's identity for one session. `uuid` may only be known after listing (F11).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRef {
     pub short_id: String,
     pub uuid: Option<String>,
 }
 
 /// Whether the session's process is alive, from polling (C2). Never a "finished" signal (F19).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Liveness {
     Busy,
     Waiting,
@@ -57,7 +57,7 @@ impl Liveness {
 }
 
 /// One row of a backend's session listing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Observation {
     pub session: SessionRef,
     pub name: Option<String>,

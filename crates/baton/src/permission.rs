@@ -5,16 +5,15 @@
 
 use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
-use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use crate::backend::{Resumed, SessionRef};
+use crate::backend::SessionRef;
 use crate::model::{Decision, Task, TaskState};
 use crate::store::{Attempt, NewDecision};
-use crate::worker::Ctx;
+use crate::worker::{self, Ctx};
 
 /// How long a `PermissionRequest` hook waits for the owner; below its timeout in
 /// the worker's settings, so Baton answers before Claude gives up on the hook.
@@ -167,30 +166,12 @@ fn deliver_late(ctx: &Ctx, d: &Decision) -> Result<&'static str> {
     }
     let task_id = attempt.task_id;
     ctx.store.lock().unwrap().audit_event("decision", d.id, "delivering_by_resume", &json!({ "session": session.short_id }))?;
-    ctx.backend.stop(&session)?;
-    // Resume only once the process is gone: resuming a live session copies it (F9).
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let running = ctx.backend.list()?.iter().any(|o| o.session.short_id == session.short_id && o.liveness.is_running());
-        if !running {
-            break;
-        }
-        if Instant::now() >= deadline {
-            bail!("worker {} didn't stop; attach with `claude attach {}` to answer", session.short_id, session.short_id);
-        }
-        sleep(Duration::from_millis(250));
+    if let Err(e) = worker::restart(ctx, &session, &attempt.worktree, RESUME_PROMPT) {
+        bail!("{e:#}; attach with `claude attach {}` to answer", session.short_id);
     }
-    match ctx.backend.resume(&session, &attempt.worktree, RESUME_PROMPT)? {
-        Resumed::Same(_) => {
-            let reason = format!("restarted the worker to deliver decision #{}", d.id);
-            ctx.store.lock().unwrap().set_task_state(task_id, Some(TaskState::Running), &reason)?;
-            Ok("restarted the worker so it asks again; the answer applies only to the same request")
-        }
-        Resumed::Copy(copy) => {
-            ctx.backend.stop(&copy)?;
-            bail!("resuming {} started a copy ({}), which Baton stopped; attach to answer", session.short_id, copy.short_id)
-        }
-    }
+    let reason = format!("restarted the worker to deliver decision #{}", d.id);
+    ctx.store.lock().unwrap().set_task_state(task_id, Some(TaskState::Running), &reason)?;
+    Ok("restarted the worker so it asks again; the answer applies only to the same request")
 }
 
 /// What an answer binds to: the tool and its exact input, minus the free-text
@@ -241,7 +222,7 @@ fn output(answer: &str, note: Option<&str>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::thread;
+    use std::thread::{self, sleep};
 
     use super::*;
     use crate::backend::Liveness;

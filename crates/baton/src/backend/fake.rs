@@ -1,6 +1,8 @@
 //! Deterministic in-memory backend. It mirrors the Claude behaviours Baton must
-//! handle: the backend assigns ids, and resuming a live session starts a copy.
+//! handle: the backend assigns ids, resuming a live session starts a copy, and
+//! (when given a file) sessions outlive the daemon (F20).
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -18,13 +20,17 @@ pub enum Call {
 #[derive(Default)]
 pub struct FakeBackend {
     state: Mutex<State>,
+    /// Where sessions are kept between daemon runs, if anywhere.
+    file: Option<PathBuf>,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 struct State {
     counter: u32,
     sessions: Vec<Observation>,
+    #[serde(skip)]
     calls: Vec<Call>,
+    #[serde(skip)]
     dispatch_error: Option<String>,
 }
 
@@ -65,13 +71,31 @@ impl FakeBackend {
         Self::default()
     }
 
+    /// A backend whose sessions are kept in `file`, so a restarted daemon finds
+    /// its workers still there, as with Claude.
+    pub fn persistent(file: PathBuf) -> Result<Self> {
+        let state = match fs::read(&file) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
+            Err(e) => return Err(e.into()),
+        };
+        Ok(Self { state: Mutex::new(state), file: Some(file) })
+    }
+
+    fn save(&self, s: &State) -> Result<()> {
+        if let Some(file) = &self.file {
+            fs::write(file, serde_json::to_vec(s)?)?;
+        }
+        Ok(())
+    }
+
     /// Changes what polling reports for a session, as its process would.
     pub fn set_liveness(&self, short_id: &str, liveness: Liveness, waiting_for: Option<&str>) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         let o = s.find(short_id)?;
         o.liveness = liveness;
         o.waiting_for = waiting_for.map(str::to_owned);
-        Ok(())
+        self.save(&s)
     }
 
     pub fn calls(&self) -> Vec<Call> {
@@ -95,7 +119,9 @@ impl Backend for FakeBackend {
         if let Some(message) = s.dispatch_error.take() {
             bail!(message);
         }
-        Ok(s.spawn(Some(req.name.clone()), Some(req.cwd.clone())))
+        let session = s.spawn(Some(req.name.clone()), Some(req.cwd.clone()));
+        self.save(&s)?;
+        Ok(session)
     }
 
     fn list(&self) -> Result<Vec<Observation>> {
@@ -109,7 +135,7 @@ impl Backend for FakeBackend {
         o.liveness = Liveness::NotRunning;
         o.pid = None;
         o.waiting_for = None;
-        Ok(())
+        self.save(&s)
     }
 
     fn resume(&self, session: &SessionRef, _cwd: &Path, prompt: &str) -> Result<Resumed> {
@@ -119,15 +145,18 @@ impl Backend for FakeBackend {
             prompt: prompt.to_owned(),
         });
         let o = s.find(&session.short_id)?;
-        if o.liveness.is_running() {
+        let resumed = if o.liveness.is_running() {
             let (name, cwd) = (o.name.clone(), o.cwd.clone());
-            return Ok(Resumed::Copy(s.spawn(name, cwd)));
-        }
-        let pid = 10_000 + s.next();
-        let o = s.find(&session.short_id)?;
-        o.liveness = Liveness::Busy;
-        o.pid = Some(pid);
-        Ok(Resumed::Same(o.session.clone()))
+            Resumed::Copy(s.spawn(name, cwd))
+        } else {
+            let pid = 10_000 + s.next();
+            let o = s.find(&session.short_id)?;
+            o.liveness = Liveness::Busy;
+            o.pid = Some(pid);
+            Resumed::Same(o.session.clone())
+        };
+        self.save(&s)?;
+        Ok(resumed)
     }
 }
 

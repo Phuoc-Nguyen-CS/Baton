@@ -116,6 +116,22 @@ pub fn transcript_tokens(path: &Path) -> Result<Tokens> {
     Ok(total)
 }
 
+/// The text of the transcript's last assistant message that has any: the worker's
+/// handoff when Baton missed its `Stop` hook. Undocumented format, best effort.
+pub fn transcript_last_text(path: &Path) -> Result<Option<String>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(text.lines().rev().find_map(|line| {
+        let entry = serde_json::from_str::<Value>(line).ok().filter(|e| e["type"] == "assistant")?;
+        let parts: Vec<&str> = entry["message"]["content"]
+            .as_array()?
+            .iter()
+            .filter(|c| c["type"] == "text")
+            .filter_map(|c| c["text"].as_str())
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n"))
+    }))
+}
+
 /// Serves OTLP/HTTP-JSON exports from workers until the daemon stops.
 pub async fn serve(listener: TcpListener, ctx: Arc<Ctx>) {
     loop {
@@ -259,5 +275,23 @@ mod tests {
         std::fs::write(&path, text.join("\n")).unwrap();
         assert_eq!(transcript_tokens(&path).unwrap(), Tokens { input: 6, output: 7, cache_read: 200, cache_write: 14 });
         assert!(transcript_tokens(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn the_last_text_is_the_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let assistant = |content: Value| json!({ "type": "assistant", "message": { "content": content } });
+        let lines = [
+            assistant(json!([{ "type": "text", "text": "working" }])),
+            assistant(json!([{ "type": "text", "text": "STATUS: done" }])),
+            assistant(json!([{ "type": "thinking", "thinking": "" }])),
+            json!({ "type": "system" }),
+        ];
+        let text: Vec<String> = lines.iter().map(Value::to_string).collect();
+        std::fs::write(&path, text.join("\n")).unwrap();
+        assert_eq!(transcript_last_text(&path).unwrap().as_deref(), Some("STATUS: done"));
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(transcript_last_text(&path).unwrap(), None);
     }
 }
