@@ -50,3 +50,15 @@ A driver script played the owner: it answered each decision through `baton decid
 - The owner's email doesn't appear anywhere in `baton.db`, although every OTel event carries it.
 
 **Found and fixed:** Baton read the transcript at the `Stop` hook. At that moment the turn's last assistant message wasn't in the file yet, so the stored cross-check held only the first message (10 / 218 / 4,831 / 1,965) and `status` said "transcript differs". Baton now re-reads the transcript on each poll for 60 s after a turn ends. This is fake-tested only; the next real run must show "transcript agrees".
+
+## Manual TUI check (M1.7, fake backend, no sessions spent)
+
+Run on 2026-10-04: a private tmux server (`tmux -L baton-m17`, tmux 3.6) with a fake-backend daemon. Task 1 was at review (1 of 2 checks passed); task 2 was running.
+
+**Tested:**
+- At 80×24 the list fits, and both the task screen (goal, worker, usage, candidate checks, change stat, handoff) and the diff screen render. The handoff falls below the fold and needs `j` to scroll into view.
+- Resizing the live window to 160×40 switched to the split list + detail layout with no restart. Resizing back to 80×24 restored the narrow layout.
+- `t` (attach) left the alternate screen, ran `claude attach fake0001`, and came back to the TUI with "claude attach fake0001 exited with exit status: 1". The session doesn't exist, so only the failure path was exercised; attaching to a live worker is part of the M1.9 demo.
+- `q` restored the terminal: tmux reported `alternate_on=0`, and the shell echoed normally.
+
+**Limitation:** when attach fails, claude's own message ("No job matching …") goes to the normal screen. It only shows up after you quit Baton; inside the TUI you see just the exit status.
