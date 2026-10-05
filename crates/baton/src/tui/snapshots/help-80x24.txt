@@ -1,0 +1,24 @@
+Baton  needs you 1 | in progress 0 | to review 1 | done 1 | 5h 85% 7d 22% (3s)
+Keys
+
+  up k         Move up (on the list) or scroll
+  down j       Move down (on the list) or scroll
+  pgup         Scroll a page up
+  pgdn         Scroll a page down
+  enter        Open the selected task
+  esc          Go back
+  y            Allow the task's pending permission request
+  n            Deny it, with an optional reason for the worker
+  a            Accept the candidate (asks to confirm); it stays on baton/<task>
+  c            Ask the worker for changes
+  d            Decide later
+  v            View the candidate's full diff
+  t            Take over the worker's terminal (claude attach); detach to return
+  ?            Show this help
+  q ctrl-c     Quit; workers keep running
+
+Enter never grants a permission or accepts work: those take their own key.
+
+
+esc back  q quit
+

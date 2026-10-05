@@ -1,3 +1,4 @@
 .claude/worktrees/
 spikes/out/
 *.md
+target/
