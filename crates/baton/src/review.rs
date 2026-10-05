@@ -131,6 +131,8 @@ fn request_changes(ctx: &Ctx, attempt: &Attempt, short: &str, note: &str) -> Res
         store().transition_attempt(attempt.id, &["running"], "turn_ended", Some(TaskState::ReviewReady), &reason)?;
         return Err(e.context("couldn't send the changes to the worker"));
     }
+    // The stop's `SessionEnd` may have said "session ended"; it's running again.
+    store().note_activity(attempt.task_id, "the worker has the owner's changes")?;
     Ok(format!("sent your changes to worker {}; Baton checks its next result", session.short_id))
 }
 
@@ -203,7 +205,7 @@ mod tests {
         f.fake.set_liveness("fake0001", crate::backend::Liveness::Idle, None).unwrap();
 
         let (task, outcome) = review(&f.ctx, t, Verdict::Changes, Some(&first[..12]), Some("say hello in French")).unwrap();
-        assert_eq!(task.state, TaskState::Running);
+        assert_eq!((task.state, task.state_reason.as_deref()), (TaskState::Running, Some("the worker has the owner's changes")));
         assert_eq!(outcome, "sent your changes to worker fake0001; Baton checks its next result");
         let calls = f.fake.calls();
         let [.., Call::Stop(stopped), Call::Resume { short_id, prompt }] = calls.as_slice() else { panic!("{calls:?}") };

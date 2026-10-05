@@ -7,6 +7,7 @@ Real Claude Code sessions run by Baton during M1 (budget: ≤30 Haiku sessions, 
 | 1 | 2026-10-04 | M1.3 + M1.5 | 1: "Create greeting.txt … Hello from Baton. Use only the Write tool." `--check "grep -qx 'Hello from Baton' greeting.txt"` `--model haiku` | 1 | ✅ `review_ready`, 1 of 1 checks passed |
 | 2 | 2026-10-04 | M1.4 | 2: "Run these three Bash commands one at a time … print(101) … print(102) … print(103). If a command is denied, don't retry it" `--check "test -f README.md"` `--model haiku` | 1 | ✅ allow, deny and late allow all delivered; `review_ready` |
 | 3 | 2026-10-04 | M1.6 | 3: "Create a file named usage.txt containing the single word ok. Use only the Write tool." `--check "grep -qx ok usage.txt"` `--model haiku` | 1 | ✅ OTel totals = transcript; quota seen; no identity stored. Cross-check read too early (fixed) |
+| 4 | 2026-10-04 | M1.8 | 4: "Create a file named hello.txt containing the single word hello. Use only the Write tool." `--check "grep -qx hello hello.txt"` `--model haiku` | 1 | ✅ daemon SIGKILLed mid-turn, worker finished unheard, restart reconciled it to `review_ready`; request changes reached the same session; accepted |
 
 ## Run 1: one worker end to end (M1.3, M1.5)
 
@@ -62,3 +63,17 @@ Run on 2026-10-04: a private tmux server (`tmux -L baton-m17`, tmux 3.6) with a 
 - `q` restored the terminal: tmux reported `alternate_on=0`, and the shell echoed normally.
 
 **Limitation:** when attach fails, claude's own message ("No job matching …") goes to the normal screen. It only shows up after you quit Baton; inside the TUI you see just the exit status.
+
+## Run 4: daemon restart + request changes (M1.8)
+
+**Tested (2.1.289):**
+- **Kill mid-turn:** Baton dispatched session `6ecb991c` 1.2 s after intake. Its daemon got `kill -9` right away, while `claude agents` showed the worker `working`. With no daemon running, the worker finished: 30 s later its row read `done`/`idle`. Its `Stop` hook had nowhere to go.
+- **Restart:** the new daemon reconciled before its first tick. The attempt was `running` and the worker `idle`, so the turn had ended unheard. Baton moved the task to verifying ("worker finished without a handoff; running checks (found after a daemon restart)"), snapshotted candidate `30143e3`, ran the check (exit 0) and reached `review_ready` about 1.7 s after starting.
+- **Request changes:** `baton review 4 changes --candidate 30143e3 --note "Also add a second line … world …"`. Baton stopped the idle worker, waited for its process to go, and resumed it flag-free with the note. That took 2.7 s, kept the same session id `6ecb991c` (no copy), and the `SessionStart` role stayed intact. The worker edited `hello.txt` and ended with a new handoff. Baton snapshotted candidate `c4f30bc` (`hello\nworld`), re-ran the check and was back at `review_ready` 15 s after the request.
+- **Accept:** `baton review 4 accept --candidate c4f30bc` left both candidates on `baton/4` and stopped the idle worker. The sandbox's main checkout stayed clean.
+
+**Limitations seen:**
+- **No handoff after the kill.** The worker's `SessionStart` also fired while the daemon was down, so at reconcile time Baton didn't know the transcript path, and `last-message.txt` stayed empty. The transcript did hold the full handoff. The path arrived seconds later with a status-line update, too late for reconcile. Verification doesn't depend on the handoff, but a `STATUS: blocked` worker caught this way would go to review instead of waiting for input.
+- **Usage gap.** OTel events sent while the daemon was down are lost, so the first turn's usage is missing and `status` says "transcript differs" (4 requests recorded). That's correct behaviour, but the M1.6 "transcript agrees" confirmation is still open.
+
+**Found and fixed:** during the restart the task read "running | worker session ended (other)", because the stop's `SessionEnd` hook overwrote the reason. Once the worker has the changes, the reason now says "the worker has the owner's changes".
