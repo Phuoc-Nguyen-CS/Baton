@@ -1,0 +1,24 @@
+Baton  needs you 1 | in progress 0 | to review 1 | done 1 | 5h 85% 7d 22% (3s)
+#2 waiting_permission
+permission #7: Bash: python3 -c 'print(103)'; run `baton decide 7 allow` or
+`deny`
+Goal: Run three python commands and report each output
+
+Needs you
+  permission #7: Bash: python3 -c 'print(103)'   (y allow | n deny)
+
+Worker
+  attempt 2 running | session 71155bb2 waiting
+  /home/me/sandbox/.claude/worktrees/baton-2-1 on baton/2
+
+Usage
+  unknown (no telemetry yet)
+
+
+
+
+
+
+
+esc back  y allow  n deny  t attach  ? help  q quit
+Deny #7. Reason for the worker (optional; enter sends, esc cancels): not needed_

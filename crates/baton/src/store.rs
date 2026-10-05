@@ -98,7 +98,7 @@ impl Store {
     /// Every task with its latest attempt and that attempt's dispatched session.
     pub fn task_views(&self) -> Result<Vec<TaskView>> {
         let mut stmt = self.conn.prepare(
-            "SELECT a.id, a.state, w.path, w.branch, s.short_id, s.liveness, s.waiting_for, s.agent_type
+            "SELECT a.id, a.state, w.path, w.branch, s.short_id, s.liveness, s.waiting_for, s.agent_type, s.backend
              FROM attempt a JOIN workspace w ON w.id = a.workspace_id
              LEFT JOIN session s ON s.attempt_id = a.id AND s.origin = 'dispatch'
              WHERE a.task_id = ?1 ORDER BY a.seq DESC, s.id DESC LIMIT 1",
@@ -117,6 +117,7 @@ impl Store {
                             liveness: r.get(5)?,
                             waiting_for: r.get(6)?,
                             agent_type: r.get(7)?,
+                            backend: r.get(8)?,
                         })
                     })
                     .optional()?;
@@ -459,6 +460,14 @@ impl Store {
             )
             .optional()?
             .with_context(|| format!("no attempt {attempt_id}"))
+    }
+
+    pub fn latest_attempt(&self, task_id: i64) -> Result<Option<Attempt>> {
+        let id: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM attempt WHERE task_id = ?1 ORDER BY seq DESC LIMIT 1", [task_id], |r| r.get(0))
+            .optional()?;
+        id.map(|id| self.attempt(id)).transpose()
     }
 
     /// Records a session seen for an attempt, filling in whatever is newly known.

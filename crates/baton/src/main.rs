@@ -9,7 +9,7 @@ use baton::daemon::{self, BackendKind};
 use baton::hook;
 use baton::doctor::{self, Level};
 use baton::paths::Paths;
-use baton::protocol::{Request, Response};
+use baton::protocol::{Request, Response, Verdict};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -54,6 +54,18 @@ enum Cmd {
         /// One of the decision's options, e.g. allow or deny
         answer: String,
         /// Message for the worker, e.g. why a request was denied
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Give your verdict on a task's candidate
+    Review {
+        task: i64,
+        #[arg(value_enum)]
+        verdict: Verdict,
+        /// The candidate commit you reviewed; refused if it has changed [default: the current one]
+        #[arg(long)]
+        candidate: Option<String>,
+        /// For `changes`: what to change. Otherwise a note for the record
         #[arg(long)]
         note: Option<String>,
     },
@@ -106,8 +118,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
         Some(Cmd::Status) => status(cli.json),
         Some(Cmd::Hook { event, attempt, role }) => Ok(run_hook(&event, attempt, &role)),
-        None => Ok(not_yet("the TUI", "M1.7")),
+        None => {
+            baton::tui::run(&Paths::from_env()?)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Some(Cmd::Decide { id, answer, note }) => decide(id, answer, note, cli.json),
+        Some(Cmd::Review { task, verdict, candidate, note }) => {
+            let request = Request::Review { task, verdict, candidate, note };
+            let Response::Reviewed { task, outcome } = client::call(&Paths::from_env()?, &request)? else {
+                bail!("unexpected reply from the daemon");
+            };
+            if cli.json {
+                println!("{}", serde_json::json!({ "task": task, "outcome": outcome }));
+            } else {
+                println!("task {}: {outcome}", task.id);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -127,11 +154,6 @@ fn run_hook(event: &str, attempt: i64, role: &str) -> ExitCode {
         println!("baton · attempt {attempt} · {role}");
     }
     ExitCode::SUCCESS
-}
-
-fn not_yet(what: &str, slice: &str) -> ExitCode {
-    eprintln!("{what} is not implemented yet (planned for {slice}); see `baton --help`");
-    ExitCode::from(2)
 }
 
 fn dir_or_cwd(dir: Option<PathBuf>) -> Result<PathBuf> {
@@ -224,7 +246,7 @@ fn decide(id: i64, answer: String, note: Option<String>, json: bool) -> Result<E
     if json {
         println!("{}", serde_json::json!({ "decision": decision, "delivery": delivery }));
     } else {
-        println!("decision {}: {} ({}) — {delivery}", decision.id, decision.answer.as_deref().unwrap_or("?"), decision.summary);
+        println!("decision {}: {} ({}): {delivery}", decision.id, decision.answer.as_deref().unwrap_or("?"), decision.summary);
     }
     Ok(ExitCode::SUCCESS)
 }

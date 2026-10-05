@@ -208,7 +208,7 @@ fn request_key(tool: &str, input: &Value) -> String {
 pub fn waiting_reason(ctx: &Ctx, task_id: i64) -> Result<String> {
     let pending = ctx.store.lock().unwrap().pending_decisions(task_id)?;
     Ok(match pending.iter().find(|d| d.kind == "permission") {
-        Some(d) => format!("permission #{}: {} — `baton decide {} allow` or `deny`", d.id, d.summary, d.id),
+        Some(d) => format!("permission #{}: {}; run `baton decide {} allow` or `deny`", d.id, d.summary, d.id),
         None => "waiting at Claude's permission prompt; attach to answer".into(),
     })
 }
@@ -344,7 +344,7 @@ mod tests {
         assert!(f.hook(1, "PermissionRequest", request.clone()).is_none(), "no answer in time: Claude's prompt stays");
         let task = f.task(t);
         assert_eq!(task.state, TaskState::WaitingPermission);
-        assert_eq!(task.state_reason.as_deref(), Some("permission #1: Bash: python3 -c 'print(3)' — `baton decide 1 allow` or `deny`"));
+        assert_eq!(task.state_reason.as_deref(), Some("permission #1: Bash: python3 -c 'print(3)'; run `baton decide 1 allow` or `deny`"));
 
         f.fake.set_liveness("fake0001", Liveness::Waiting, Some("permission prompt")).unwrap();
         let (d, delivery) = decide(&f.ctx, 1, "allow", None).unwrap();

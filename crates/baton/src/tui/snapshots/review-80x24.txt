@@ -1,0 +1,24 @@
+Baton  needs you 1 | in progress 0 | to review 1 | done 1 | 5h 85% 7d 22% (3s)
+#3 review_ready
+ready for review: 1 of 1 checks passed
+Goal: Create a file named usage.txt containing the single word ok.
+
+Worker
+  attempt 3 turn_ended | session 411afd47 idle
+  /home/me/sandbox/.claude/worktrees/baton-3-1 on baton/3
+
+Usage
+  2 requests | 18 in / 422 out / 11627 cache read / 2851 cache write | $0.0090
+est. (transcript agrees)
+
+Candidate 206e9624e4d8 on baton/3
+  passed      grep -qx ok usage.txt (exit 0)
+
+Changes
+   usage.txt | 1 +
+   1 file changed, 1 insertion(+)
+
+Worker's handoff (its own claim, not evidence)
+  Done.
+esc back  a accept  c changes  d defer  v diff  t attach  ? help  q quit
+

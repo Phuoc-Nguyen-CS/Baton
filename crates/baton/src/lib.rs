@@ -8,7 +8,9 @@ pub mod model;
 pub mod paths;
 pub mod permission;
 pub mod protocol;
+pub mod review;
 pub mod store;
+pub mod tui;
 #[cfg(test)]
 mod testutil;
 pub mod usage;

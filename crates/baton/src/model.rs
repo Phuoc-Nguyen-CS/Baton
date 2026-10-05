@@ -132,6 +132,18 @@ pub struct Usage {
     pub transcript: Option<Tokens>,
 }
 
+/// The review screen's evidence for a task's newest candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TaskDetail {
+    /// `git diff --stat` from the base to the candidate.
+    pub stat: String,
+    pub patch: String,
+    /// The patch was cut to fit; the full diff is on `baton/<task>`.
+    pub truncated: bool,
+    /// The worker's last reply, with its handoff. Untrusted text.
+    pub last_message: Option<String>,
+}
+
 /// The account's quota from a worker's status line, with the time it was seen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quota {
@@ -188,6 +200,8 @@ pub struct Worker {
     pub branch: String,
     /// The dispatched session's short id, once known.
     pub session: Option<String>,
+    /// `claude`, or `fake` in tests and demos.
+    pub backend: Option<String>,
     pub liveness: Option<String>,
     pub waiting_for: Option<String>,
     pub agent_type: Option<String>,

@@ -4,7 +4,7 @@ _Last updated: 2026-10-04_
 
 **Milestone:** M1: deliver one reviewable task (PLAN.md §11; architecture in `docs/architecture.md`)
 **State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1–M1.6 done; real runs 1–3 passed (`docs/m1-smoke.md`).
-**Next action:** M1.7 TUI (ratatui): 80×24 and wide layouts, review screen, accept / request changes / defer, native attach. Note: the account's 5 h quota read 85% at 17:47 (mostly this build session).
+**Next action:** finish M1.7: the manual tmux check (a private `tmux -L` server, 80×24 then 160×40, attach, quit, terminal restored). The scripted attempt failed to start tmux inside the build session's sandbox, so run it by hand. Then M1.8 (request changes + daemon-restart reconcile) and M1.9. Note: the account's 5 h quota read 85% at 17:47 (mostly this build session).
 
 **M0 summary:** 8 steps, 23 real sessions, findings F1–F20 in `docs/compat-record.md`; spike scripts in `spikes/` double as compatibility tests for Claude Code upgrades.
 
@@ -17,7 +17,7 @@ Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made w
 - [x] **M1.4 Permissions**: `acceptEdits` + policy hook (D2); out-of-scope requests become decisions; `baton decide <id> allow|deny`; stop + resume recovery with exact-request matching. Verify: allow, deny, and late-answer cases. (Real run 2: all three delivered.)
 - [x] **M1.5 Candidate + checks**: on the worker's final `Stop`, snapshot the worktree as a commit on `baton/<task>`, run the check command there, store results against that tree hash; any later change invalidates them. Verify: one passing and one failing check. (Fake-backend demo: "1 of 2 checks passed".)
 - [x] **M1.6 Usage**: OTLP receiver in the daemon (identity stripped) + status-line quota (D6), per attempt. Verify: totals match the transcript. (Real run 3: exact match; the re-read fix still needs a real "transcript agrees".)
-- [ ] **M1.7 TUI**: 80×24 and wide layouts answering "what needs me / what's progressing / what's ready to review"; review screen (goal, diff, check evidence, usage); accept / request changes / defer; native attach with terminal restore. Verify: ratatui test-backend snapshots at both sizes + a manual tmux check.
+- [ ] **M1.7 TUI**: 80×24 and wide layouts answering "what needs me / what's progressing / what's ready to review"; review screen (goal, diff, check evidence, usage); accept / request changes / defer; native attach with terminal restore. Verify: ratatui test-backend snapshots at both sizes + a manual tmux check. *(Code + 10 TUI tests incl. golden snapshots at 80×24 and 160×40 done; `baton review accept|defer` CLI; manual tmux check pending.)*
 - [ ] **M1.8 Steer + recover**: "request changes" steers via hooks or stop + resume (D5); daemon start reconciles live attempts (F20). Verify: kill the daemon mid-task, restart, task continues.
 - [ ] **M1.9 Demo + report**: demo script, evidence, measured usage and human decisions per task, limitations, next scope.
 

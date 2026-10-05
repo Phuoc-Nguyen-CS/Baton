@@ -1,0 +1,24 @@
+Baton  needs you 1 | in progress 0 | to review 1 | done 1 | 5h 85% 7d 22% (3s)
+ + #3   review_ready       Create a file named usage.txt containing the single w
+>! #2   waiting_permission Run three python commands and report each output
+   #1   accepted           Create greeting.txt
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+j/k move  enter open  ? help  q quit
+

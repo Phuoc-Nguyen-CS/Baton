@@ -21,6 +21,7 @@ use crate::backend::fake::FakeBackend;
 use crate::git;
 use crate::paths::Paths;
 use crate::protocol::{MAX_MESSAGE, Request, Response};
+use crate::review;
 use crate::store::{NewTask, Store};
 use crate::usage;
 use crate::permission::{self, Waiters};
@@ -208,6 +209,11 @@ fn handle(ctx: &Ctx, wake: &Notify, request: Request) -> Response {
         }
         Request::Decide { id, answer, note } => permission::decide(ctx, id, &answer, note.as_deref())
             .map(|(decision, delivery)| Response::Decided { decision, delivery: delivery.into() }),
+        Request::Detail { task } => review::detail(ctx, task).map(|detail| Response::Detail { detail }),
+        Request::Review { task, verdict, candidate, note } => {
+            review::review(ctx, task, verdict, candidate.as_deref(), note.as_deref())
+                .map(|(task, outcome)| Response::Reviewed { task, outcome })
+        }
     };
     result.unwrap_or_else(|e| Response::Error { message: format!("{e:#}") })
 }
