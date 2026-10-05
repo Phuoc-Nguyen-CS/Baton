@@ -140,9 +140,18 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// How long after a turn ends the transcript is re-read for the cross-check.
+const TRANSCRIPT_RECHECK: Duration = Duration::from_secs(60);
+
 /// Refreshes liveness from the backend's listing. Only the permission prompt
 /// changes task state here; everything else comes from hooks (F19).
 fn poll(ctx: &Ctx) -> Result<()> {
+    let recent = ctx.store().recent_transcripts(now_ms() - TRANSCRIPT_RECHECK.as_millis() as i64)?;
+    for (session, path) in recent {
+        if let Ok(tokens) = usage::transcript_tokens(&path) {
+            ctx.store().set_transcript_usage(session, &tokens)?;
+        }
+    }
     let sessions = ctx.store().live_sessions()?;
     if sessions.is_empty() {
         return Ok(());
@@ -435,6 +444,26 @@ mod tests {
         // The worker gets new instructions: the task is running again.
         f.hook(1, "UserPromptSubmit", json!({ "session_id": "fake0001-x" }));
         assert_eq!(f.task(t).state, TaskState::Running);
+    }
+
+    #[test]
+    fn the_transcript_is_read_again_after_stop() {
+        // Seen in smoke run 3: at Stop the transcript lacked the last message's usage.
+        let f = fixture();
+        let t = f.add_task("add a greeting");
+        tick(&f.ctx).unwrap();
+        let transcript = f.ctx.paths.home.join("t.jsonl");
+        let entry = |id: &str| json!({ "type": "assistant", "message": { "id": id, "usage": { "input_tokens": 1, "output_tokens": 1 } } }).to_string();
+        fs::write(&transcript, entry("m1")).unwrap();
+        let input = json!({ "session_id": "fake0001-x", "transcript_path": transcript, "last_assistant_message": "STATUS: done" });
+        f.hook(1, "Stop", input);
+        let stored = || f.ctx.store().conn().query_row("SELECT transcript_usage FROM session", [], |r| r.get::<_, String>(0)).unwrap();
+        assert!(stored().contains("\"input\":1"));
+
+        fs::write(&transcript, format!("{}\n{}", entry("m1"), entry("m2"))).unwrap();
+        tick(&f.ctx).unwrap();
+        assert!(stored().contains("\"input\":2"), "{}", stored());
+        assert_eq!(f.task(t).state, TaskState::ReviewReady);
     }
 
     #[test]

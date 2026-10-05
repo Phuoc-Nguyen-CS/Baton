@@ -623,6 +623,20 @@ impl Store {
             .optional()?)
     }
 
+    /// Sessions whose attempt finished its turn since `since_ms`, with their
+    /// transcripts: Claude writes the turn's last usage entry after the `Stop`
+    /// hook, so the cross-check is read again for a while.
+    pub fn recent_transcripts(&self, since_ms: i64) -> Result<Vec<(i64, PathBuf)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.id, s.transcript FROM session s JOIN attempt a ON a.id = s.attempt_id
+             WHERE a.state = 'turn_ended' AND a.observed_ms >= ?1 AND s.transcript IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([since_ms], |r| Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     /// A session's transcript path, as reported by its hooks.
     pub fn transcript_path(&self, session_id: i64) -> Result<Option<PathBuf>> {
         let path: Option<String> =

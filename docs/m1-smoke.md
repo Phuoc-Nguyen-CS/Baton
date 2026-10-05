@@ -6,6 +6,7 @@ Real Claude Code sessions run by Baton during M1 (budget: ≤30 Haiku sessions, 
 |---|---|---|---|---|---|
 | 1 | 2026-10-04 | M1.3 + M1.5 | 1: "Create greeting.txt … Hello from Baton. Use only the Write tool." `--check "grep -qx 'Hello from Baton' greeting.txt"` `--model haiku` | 1 | ✅ `review_ready`, 1 of 1 checks passed |
 | 2 | 2026-10-04 | M1.4 | 2: "Run these three Bash commands one at a time … print(101) … print(102) … print(103). If a command is denied, don't retry it" `--check "test -f README.md"` `--model haiku` | 1 | ✅ allow, deny and late allow all delivered; `review_ready` |
+| 3 | 2026-10-04 | M1.6 | 3: "Create a file named usage.txt containing the single word ok. Use only the Write tool." `--check "grep -qx ok usage.txt"` `--model haiku` | 1 | ✅ OTel totals = transcript; quota seen; no identity stored. Cross-check read too early (fixed) |
 
 ## Run 1: one worker end to end (M1.3, M1.5)
 
@@ -38,3 +39,14 @@ A driver script played the owner: it answered each decision through `baton decid
 **Found and fixed before this run succeeded:**
 - **Capacity bug:** task 2 first sat `queued` for 21 minutes with no reason, because task 1's idle worker (turn ended, awaiting review) was counted as busy. No session was spent. Now only `preparing`/`dispatching`/`running` attempts hold the slot, and queued tasks say what they're waiting for.
 - **Deadlock in that fix:** a `MutexGuard` in a `match` scrutinee lived through the match arms. The fake-backend tests hung on it before it reached a real run.
+
+## Run 3: usage and quota (M1.6)
+
+**Tested (2.1.289):**
+- The worker's `--settings` `env` sent OTLP/HTTP-JSON to Baton's receiver on `127.0.0.1:47318`. Baton stored 2 `api_request` rows, keyed by `request_id` and matched to session `411afd47` by UUID.
+- **OTel totals:** 18 input, 422 output, 11,627 cache read, 2,851 cache write, $0.0090 (client estimate).
+- **Transcript, counted independently** with the M0.6 Python logic after the run: 2 messages from 4 entries, the same 18 / 422 / 11,627 / 2,851. The totals match exactly.
+- **Quota** reached Baton through the status line hook (`refreshInterval: 5`), showing 5 h 85% and 7 d 22% one second after the turn. It is account-wide: it includes the owner's other sessions, mostly this build session.
+- The owner's email doesn't appear anywhere in `baton.db`, although every OTel event carries it.
+
+**Found and fixed:** Baton read the transcript at the `Stop` hook. At that moment the turn's last assistant message wasn't in the file yet, so the stored cross-check held only the first message (10 / 218 / 4,831 / 1,965) and `status` said "transcript differs". Baton now re-reads the transcript on each poll for 60 s after a turn ends. This is fake-tested only; the next real run must show "transcript agrees".
