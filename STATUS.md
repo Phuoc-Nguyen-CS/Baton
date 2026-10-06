@@ -1,10 +1,10 @@
 # Status
 
-_Last updated: 2026-10-04_
+_Last updated: 2026-10-06_
 
 **Milestone:** M1: deliver one reviewable task (PLAN.md §11; architecture in `docs/architecture.md`)
-**State:** M1 in progress on branch `worktree-m1` (plan approved 2026-10-04). M1.1–M1.8 done; real runs 1–4 and the manual TUI check passed (`docs/m1-smoke.md`).
-**Next action:** M1.9: demo script + report (evidence, measured usage and human decisions per task, limitations, next scope). The demo should attach to a live worker once (M1.7 only exercised the failure path) and, if possible, show a real "transcript agrees" (still open from M1.6). Quota at 20:31: 5 h 9%, 7 d 25%.
+**State:** M1 complete on branch `worktree-m1.9` (from `main`), awaiting the owner's review and merge. M1.1–M1.9 done; 6 real runs passed (`docs/m1-smoke.md`); report in `docs/m1-report.md` (untracked: see Open decisions).
+**Next action:** owner reviews the M1 report and answers the open decisions below; then draft the M2 slice plan (PLAN §11) for approval. Quota at 15:46 on 2026-10-06: 5 h 5%, 7 d 27%.
 
 **M0 summary:** 8 steps, 23 real sessions, findings F1–F20 in `docs/compat-record.md`; spike scripts in `spikes/` double as compatibility tests for Claude Code upgrades.
 
@@ -19,16 +19,18 @@ Outcome: `baton task "<goal>" --check "<cmd>"` runs one worker in a Baton-made w
 - [x] **M1.6 Usage**: OTLP receiver in the daemon (identity stripped) + status-line quota (D6), per attempt. Verify: totals match the transcript. (Real run 3: exact match; the re-read fix still needs a real "transcript agrees".)
 - [x] **M1.7 TUI**: 80×24 and wide layouts answering "what needs me / what's progressing / what's ready to review"; review screen (goal, diff, check evidence, usage); accept / request changes / defer; native attach with terminal restore. Verify: ratatui test-backend snapshots at both sizes + a manual tmux check. *(Code + 10 TUI tests incl. golden snapshots at 80×24 and 160×40 done; `baton review accept|defer` CLI; manual tmux check passed at both sizes, attach failure path only.)*
 - [x] **M1.8 Steer + recover**: "request changes" steers via hooks or stop + resume (D5); daemon start reconciles live attempts (F20). Verify: kill the daemon mid-task, restart, task continues. (Real run 4: SIGKILL mid-turn → reconciled to `review_ready`; changes reached the same session; accepted.)
-- [ ] **M1.9 Demo + report**: demo script, evidence, measured usage and human decisions per task, limitations, next scope.
+- [x] **M1.9 Demo + report**: demo script, evidence, measured usage and human decisions per task, limitations, next scope. *(`demo/m1-demo.sh`; real run 6 on 2.1.292: permission, checks, live attach, changes, accept; usage cross-check fixed for the idle recap request, F21.)*
 
 Accepting a task leaves the result on branch `baton/<task>`; merging into the owner's branch stays the owner's action (PLAN §6).
 
 ## Open decisions (owner)
-None. (M1 budget approved 2026-10-04: ≤30 Haiku sessions. Counter: 4 used; log in `docs/m1-smoke.md`.)
+(M1 budget approved 2026-10-04: ≤30 Haiku sessions. Counter: 6 used; log in `docs/m1-smoke.md`.)
+1. **Claude Code 2.1.292:** re-run the M0 spikes (costs real sessions) or accept the version on run 6's evidence. ★ Re-run only the spikes for paths run 6 didn't cover (late answer, copy detection; ~4 Haiku sessions).
+2. **`docs/m1-report.md` vs `.gitignore` `*.md`:** track it (`git add -f`), or keep new docs local. ★ Track it, if `*.md` was meant only for PLAN.md.
+3. **M2 go-ahead and budget:** ★ draft the M2 slice plan first (no spend), then set a session budget with it.
 
 ## Waiting on owner (not blocking)
-- **Remote backup:** approved, but `gh` isn't installed. Either `sudo apt install gh && gh auth login`, or create an empty private repo on github.com and give me its URL.
-- **Commit PLAN.md on main** if not done yet: `git add PLAN.md && git commit -m "Add PLAN.md spec"`.
+- **Push + merge M1.9:** the branch isn't on GitHub (no git credentials in agent shells): `git push -u origin worktree-m1.9`, then `git merge worktree-m1.9` on `main`.
 - **Leftovers you may delete:** `~/scratch/baton-sandbox` (M0 no longer needs an untrusted folder). Keep `~/projects/baton-sandbox*` for M1 smoke tests.
 
 ## Blockers
@@ -52,3 +54,4 @@ None.
 - 2026-10-04: M1.6 usage: OTLP receiver + `api_request` rows, status-line quota, transcript cross-check; real run 3 (1 session): OTel totals equal the transcript exactly, no identity stored. Fixed: transcript read before its last entry was written.
 - 2026-10-04: M1.7 TUI: list/task/diff/help screens at 80×24 and wide, review actions bound to the candidate, native attach; golden snapshots + manual tmux check (fake backend).
 - 2026-10-04: M1.8 steer + recover: `baton review <t> changes --note` resumes the same session (stop + flag-free resume, shared with late permission answers); daemon start reconciles busy attempts before any tick; fake backend persists sessions; 83 tests. Real run 4 (1 session) passed. Limitation: a handoff missed while the daemon was down is recovered only if `SessionStart` reached Baton first.
+- 2026-10-06: M1.9 demo + report: `demo/m1-demo.sh`; real run 6 on Claude Code 2.1.292 (permission allow, checks 1/2 → 2/2 after changes, live attach and back, accept, 236 s). Found an unlogged run 5 and F21 (idle `away_summary` request); the cross-check now shows it as a side request; "transcript agrees" confirmed on real runs 5 and 6. 83 tests. M1 complete.

@@ -12,7 +12,7 @@ Evidence labels:
 
 | Item | Value |
 |---|---|
-| Claude Code | 2.1.289 |
+| Claude Code | 2.1.289 (M0 spikes, M1 runs 1–5). 2.1.292 since 2026-10-06: only the M1.9 demo (smoke run 6) ran on it; the spikes have not been re-run |
 | OS | Linux 6.18.33.2-microsoft-standard-WSL2 |
 | tmux | 3.6 |
 | git | 2.53.0 |
@@ -44,6 +44,7 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 18. **Baton can steer workers with hooks and the CLI alone.** Busy: a `PostToolUse` hook reading Baton's queue delivers at the next tool boundary (wait ≈ the running tool), a `Stop` hook at turn end; the hook's own log is the delivery receipt. Idle: `claude stop` + flag-free resume with the instruction as the prompt (≈2 s to delivery, same session). `SendMessage` also works for both and is near-instant when idle, but needs a Claude session as the sender. Resuming a live idle session is **not** a route: it copies. (Tested)
 19. **Don't read "finished" from `state`.** One idle worker showed `working`, then `blocked`, never `done`. Use `status`, the `Stop` hook, and `Notification` `idle_prompt` (60 s after idle). (Tested)
 20. **Workers outlive the supervisor.** Each background session is its own process: a graceful `--keep-workers` stop or a `kill -9` of the supervisor didn't interrupt a busy worker, and the next `claude agents`/`claude --bg` call started a new supervisor that re-adopted it with the same pid. Baton needn't babysit the supervisor; after any hiccup it re-reads `claude agents --json --all`. (Tested)
+21. **An idle session makes one billed request no transcript counts.** About 3 min after a turn ends, Claude Code sends an `away_summary` request (OTel `api_request`, same `session.id`) and writes it to the transcript as `system`/`away_summary` with no `usage`. Seen in smoke run 5 (2.1.289, +196 s) and run 6 (2.1.292, +183 s; 79 in / 326 out). Baton matches transcript `requestId`s against OTel and shows the rest as side requests. (Tested)
 
 ## Capabilities
 
@@ -71,7 +72,8 @@ Doc pages: [agent-view], [cli-reference], [hooks], [cross-session-messaging], [c
 
 ### C5 Attach, logs, stop, delete
 - **Doc/Probed:** `attach <id>` takes over the terminal (fullscreen); `←`/`/exit` detaches, `Ctrl+Z` drops to the shell; detaching never stops the session. Unsent input blocks detach. `logs <id>` prints recent terminal output. `stop|kill <id>` keeps the conversation. `rm <id>` deletes the session and its worktree when safe (`--discard-unpushed`, `--force-remove-worktree`).
-- **Tested:** `logs` is a raw screen capture (ANSI, no newlines, partial redraws such as "Commtted"), so it's display-only after sanitizing. It does show pending permission dialogs in full. `stop` prints `stopped <id>` and `worktree retained at <path>`. `rm` works on live idle sessions. It refused a Claude-made worktree with uncommitted changes (`kept … Deleting it would lose them`) and then with unpushed commits (`kept … 2 unpushed commits … claude rm <id> --discard-unpushed <sha>@<worktree-id>`). With that flag it removed the worktree **and its branch**. It removed sessions in Baton-made worktrees and left those worktrees untouched. `attach` not tested (needs a TTY).
+- **Tested:** `logs` is a raw screen capture (ANSI, no newlines, partial redraws such as "Commtted"), so it's display-only after sanitizing. It does show pending permission dialogs in full. `stop` prints `stopped <id>` and `worktree retained at <path>`. `rm` works on live idle sessions. It refused a Claude-made worktree with uncommitted changes (`kept … Deleting it would lose them`) and then with unpushed commits (`kept … 2 unpushed commits … claude rm <id> --discard-unpushed <sha>@<worktree-id>`). With that flag it removed the worktree **and its branch**. It removed sessions in Baton-made worktrees and left those worktrees untouched.
+- **Tested (2.1.292, smoke run 6, `demo/m1-demo.sh`):** `attach` from Baton's TUI in an 80×24 tmux pane showed the idle worker's conversation, its handoff, and Baton's status line. `Ctrl+Z` ended `claude attach` and returned to Baton's review screen, and the session stayed idle and resumable. At 80 columns Claude shows "Resize your terminal to at least 110 columns to show the diff panel".
 - **Fallback:** Baton cleans up its own worktrees; it treats `rm`'s `kept` output as "work at risk" and asks the owner.
 
 ### C6 Supervisor and machine restart

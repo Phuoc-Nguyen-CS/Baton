@@ -8,6 +8,8 @@ Real Claude Code sessions run by Baton during M1 (budget: ≤30 Haiku sessions, 
 | 2 | 2026-10-04 | M1.4 | 2: "Run these three Bash commands one at a time … print(101) … print(102) … print(103). If a command is denied, don't retry it" `--check "test -f README.md"` `--model haiku` | 1 | ✅ allow, deny and late allow all delivered; `review_ready` |
 | 3 | 2026-10-04 | M1.6 | 3: "Create a file named usage.txt containing the single word ok. Use only the Write tool." `--check "grep -qx ok usage.txt"` `--model haiku` | 1 | ✅ OTel totals = transcript; quota seen; no identity stored. Cross-check read too early (fixed) |
 | 4 | 2026-10-04 | M1.8 | 4: "Create a file named hello.txt containing the single word hello. Use only the Write tool." `--check "grep -qx hello hello.txt"` `--model haiku` | 1 | ✅ daemon SIGKILLed mid-turn, worker finished unheard, restart reconciled it to `review_ready`; request changes reached the same session; accepted |
+| 5 | 2026-10-04 | (unlogged) | 5: "Create bye.txt containing the single word bye. Use only the Write tool." `--check "grep -qx bye bye.txt"` `--model haiku` | 1 | ✅ `review_ready` in 10 s. Logged on 2026-10-06 from `baton.db`; who ran it isn't recorded. Its usage revealed F21 |
+| 6 | 2026-10-06 | M1.9 | 6: `demo/m1-demo.sh --idle 200` (notes.txt + `python3 -c 'print(6*7)'`), 2 checks, `--model haiku`, Claude Code **2.1.292** | 1 | ✅ permission allow → review → live attach and back → idle → request changes → accept; transcript agrees; 1 side request |
 
 ## Run 1: one worker end to end (M1.3, M1.5)
 
@@ -77,3 +79,25 @@ Run on 2026-10-04: a private tmux server (`tmux -L baton-m17`, tmux 3.6) with a 
 - **Usage gap.** OTel events sent while the daemon was down are lost, so the first turn's usage is missing and `status` says "transcript differs" (4 requests recorded). That's correct behaviour, but the M1.6 "transcript agrees" confirmation is still open.
 
 **Found and fixed:** during the restart the task read "running | worker session ended (other)", because the stop's `SessionEnd` hook overwrote the reason. Once the worker has the changes, the reason now says "the worker has the owner's changes".
+
+## Run 5: an unlogged run, and the idle recap request (F21)
+
+Found on 2026-10-06 in the smoke `baton.db`: task 5 (session `9dc5dc37`, 2026-10-04 20:54) reached `review_ready` 10 s after intake, 1 of 1 checks passed. No notes record who ran it; it counts against the M1 budget.
+
+**Tested (2.1.289):** OTel recorded 4 requests and the transcript 3. The 3 the transcript lists match OTel exactly, request by request (26 / 470 / 19,332 / 3,038 in total), which is the real-run "transcript agrees" that M1.6 left open. The 4th (`req_011CfiRE2v…`, 79 in / 386 out) came 196 s after the turn ended. It is Claude Code's `away_summary` recap of the idle session: the transcript has a `system`/`away_summary` entry with no `usage`.
+
+**Found and fixed:** every task left at review for more than ~3 min would have shown "transcript differs". Transcripts now keep their `requestId`s, and OTel requests no transcript lists are shown as side requests outside the comparison ("transcript agrees; 1 side request").
+
+## Run 6: the M1.9 demo (`demo/m1-demo.sh --idle 200`)
+
+Claude Code **2.1.292** (`baton doctor` warned it is untested). Captured screens and logs: `target/m1-demo/run6/` in the M1.9 worktree (not committed).
+
+**Tested (2.1.292)**, times from intake (audit log):
+- 0.86 s dispatched (session `22679755`). 5.3 s: `python3 -c 'print(6*7)'` became decision 6; the script's `baton decide 6 allow` was applied at 6.2 s and the command ran (output `42`).
+- 10.3 s turn ended; 11.95 s `review_ready`, candidate `0ffdae5`: 1 of 2 checks passed. The failure was the demo's own check: `test $(wc -l < notes.txt) -ge 1` counts newlines, and the worker wrote `one` without one. Baton reported it as it should; the owner decides.
+- TUI at 80×24: list, then the review screen (goal, worker, usage with "transcript agrees", both check results, diff stat). `t` attached to the **live** worker: Claude's screen with the handoff and Baton's status line (`baton · attempt 6 · baton-worker`). `Ctrl+Z` returned to the review screen, which said "back from worker 22679755"; `q` quit cleanly.
+- Idle at review: the `away_summary` request arrived 183 s after the turn. `status` then read "3 requests … (transcript agrees; 1 side request)", which confirms the run-5 fix on real data.
+- 225.4 s request changes ("Add a second line to notes.txt: two."): the worker had them 2.4 s later (same session). 236.0 s new candidate `40f38ea` (`one\ntwo`), 2 of 2 checks passed; accepted. Both candidates are on `baton/6`; the sandbox's main checkout was untouched.
+- Final usage: 6 requests, 123 in / 1,388 out / 37,784 cache read / 8,216 cache write, $0.0273 est. (transcript agrees; 1 side request). Human decisions: permission allow, request changes, accept.
+
+**Limitation seen:** right after the allow, the task flipped back to `waiting_permission` for 2 s (6.29 s → 8.29 s) with no new decision. The cause is likely a stale `waitingFor: permission prompt` in Claude's listing, or a late `permission_prompt` notification; the log doesn't say which. It's cosmetic: nothing waited on it.
