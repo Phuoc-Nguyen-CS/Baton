@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::model::Tokens;
+use crate::model::{Tokens, TranscriptUsage};
 use crate::worker::Ctx;
 
 /// The receiver's default port; `BATON_OTLP_PORT` overrides it (0 = any free port).
@@ -84,11 +84,12 @@ fn number(v: &Value) -> Option<f64> {
 }
 
 /// Token totals in a transcript: assistant entries with `usage`, one per message
-/// id (a message spans several entries; the last one counts). The format is
-/// undocumented, so this is a fallible cross-check, never the source of truth.
-pub fn transcript_tokens(path: &Path) -> Result<Tokens> {
+/// id (a message spans several entries; the last one counts), with their
+/// `requestId`s. The format is undocumented, so this is a fallible cross-check,
+/// never the source of truth.
+pub fn transcript_tokens(path: &Path) -> Result<TranscriptUsage> {
     let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let mut by_message: Vec<(String, Tokens)> = Vec::new();
+    let mut by_message: Vec<(String, Tokens, Option<String>)> = Vec::new();
     for line in text.lines() {
         let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
         let message = &entry["message"];
@@ -104,14 +105,16 @@ pub fn transcript_tokens(path: &Path) -> Result<Tokens> {
             cache_read: count("cache_read_input_tokens"),
             cache_write: count("cache_creation_input_tokens"),
         };
-        match by_message.iter_mut().find(|(m, _)| *m == id) {
-            Some(slot) => slot.1 = tokens,
-            None => by_message.push((id, tokens)),
+        let request = entry["requestId"].as_str().map(str::to_owned);
+        match by_message.iter_mut().find(|(m, ..)| *m == id) {
+            Some(slot) => (slot.1, slot.2) = (tokens, request),
+            None => by_message.push((id, tokens, request)),
         }
     }
-    let mut total = Tokens::default();
-    for (_, t) in by_message {
-        total += t;
+    let mut total = TranscriptUsage::default();
+    for (_, t, request) in by_message {
+        total.tokens += t;
+        total.requests.extend(request);
     }
     Ok(total)
 }
@@ -268,12 +271,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
         let entry = |id: &str, out: i64| {
-            json!({ "type": "assistant", "message": { "id": id, "usage": { "input_tokens": 3, "output_tokens": out, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 7 } } })
+            json!({ "type": "assistant", "requestId": format!("req_{id}"), "message": { "id": id, "usage": { "input_tokens": 3, "output_tokens": out, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 7 } } })
         };
         let lines = [entry("m1", 1), entry("m1", 5), json!({ "type": "user", "message": {} }), entry("m2", 2)];
         let text: Vec<String> = lines.iter().map(Value::to_string).chain(["not json".into()]).collect();
         std::fs::write(&path, text.join("\n")).unwrap();
-        assert_eq!(transcript_tokens(&path).unwrap(), Tokens { input: 6, output: 7, cache_read: 200, cache_write: 14 });
+        let usage = transcript_tokens(&path).unwrap();
+        assert_eq!(usage.tokens, Tokens { input: 6, output: 7, cache_read: 200, cache_write: 14 });
+        assert_eq!(usage.requests, ["req_m1", "req_m2"]);
         assert!(transcript_tokens(&dir.path().join("missing")).is_err());
     }
 

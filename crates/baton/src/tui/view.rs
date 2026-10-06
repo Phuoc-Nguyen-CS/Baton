@@ -147,11 +147,7 @@ fn detail_lines(app: &App, t: &TaskView, theme: &Theme) -> Vec<Line<'static>> {
     out.push(Line::raw(match &t.usage {
         Some(u) => {
             let k = u.tokens;
-            let check = match u.transcript {
-                Some(tr) if tr == k => "transcript agrees",
-                Some(_) => "transcript differs",
-                None => "transcript not read yet",
-            };
+            let check = u.cross_check();
             format!(
                 "  {} requests | {} in / {} out / {} cache read / {} cache write | ${:.4} est. ({check})",
                 u.requests, k.input, k.output, k.cache_read, k.cache_write, u.cost_usd

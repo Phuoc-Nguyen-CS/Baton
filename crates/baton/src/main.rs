@@ -211,11 +211,7 @@ fn status(json: bool) -> Result<ExitCode> {
                 match &view.usage {
                     Some(u) => {
                         let t = u.tokens;
-                        let check = match u.transcript {
-                            Some(tr) if tr == t => "transcript agrees",
-                            Some(_) => "transcript differs",
-                            None => "transcript not read yet",
-                        };
+                        let check = u.cross_check();
                         println!(
                             "      usage: {} requests · {} in / {} out / {} cache read / {} cache write · ${:.4} est. ({check})",
                             u.requests, t.input, t.output, t.cache_read, t.cache_write, u.cost_usd

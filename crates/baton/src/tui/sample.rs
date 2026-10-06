@@ -50,7 +50,7 @@ pub fn app() -> App {
             checks: vec![CheckResult { command: "grep -qx ok usage.txt".into(), state: "passed".into(), exit_code: Some(0), output: None }],
         }),
         decisions: vec![],
-        usage: Some(Usage { requests: 2, tokens, cost_usd: 0.009, last_ms: NOW - 5_000, transcript: Some(tokens) }),
+        usage: Some(Usage { requests: 2, tokens, cost_usd: 0.009, last_ms: NOW - 5_000, transcript: Some(tokens), side_requests: 0, side_tokens: Tokens::default() }),
     };
     let mut waiting = TaskView {
         task: task(

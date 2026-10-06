@@ -130,6 +130,35 @@ pub struct Usage {
     /// The same sessions' transcripts, read at their last `Stop`; `None` until
     /// every session with usage has been read.
     pub transcript: Option<Tokens>,
+    /// Requests in `tokens` that no transcript lists, such as Claude Code's
+    /// `away_summary` recap of an idle session (M1.9): billed, but outside the
+    /// cross-check.
+    pub side_requests: i64,
+    pub side_tokens: Tokens,
+}
+
+impl Usage {
+    /// The transcript cross-check, for display.
+    pub fn cross_check(&self) -> String {
+        let Some(mut expected) = self.transcript else { return "transcript not read yet".into() };
+        expected += self.side_tokens;
+        let verdict = if expected == self.tokens { "transcript agrees" } else { "transcript differs" };
+        match self.side_requests {
+            0 => verdict.into(),
+            1 => format!("{verdict}; 1 side request"),
+            n => format!("{verdict}; {n} side requests"),
+        }
+    }
+}
+
+/// A transcript's token totals and the request ids they came from. Rows stored
+/// before M1.9 have no ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptUsage {
+    #[serde(flatten)]
+    pub tokens: Tokens,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests: Vec<String>,
 }
 
 /// The review screen's evidence for a task's newest candidate.

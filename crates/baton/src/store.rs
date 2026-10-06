@@ -9,7 +9,7 @@ use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde_json::json;
 
-use crate::model::{Candidate, CheckResult, Decision, Quota, Task, TaskState, TaskView, Tokens, Usage, Worker};
+use crate::model::{Candidate, CheckResult, Decision, Quota, Task, TaskState, TaskView, Tokens, TranscriptUsage, Usage, Worker};
 use crate::usage::ApiRequest;
 
 /// Entry `i` moves the schema from version `i` to `i + 1`.
@@ -590,21 +590,45 @@ impl Store {
         }
         // The cross-check counts only when every session with usage was read.
         let mut stmt = self.conn.prepare(
-            "SELECT s.transcript_usage FROM session s JOIN attempt a ON a.id = s.attempt_id
+            "SELECT s.id, s.transcript_usage FROM session s JOIN attempt a ON a.id = s.attempt_id
              WHERE a.task_id = ?1 AND EXISTS (SELECT 1 FROM usage u WHERE u.session_id = s.id)",
         )?;
-        let read: Vec<Option<String>> = stmt.query_map([task_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        let transcript = read
+        let read: Vec<(i64, Option<String>)> =
+            stmt.query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        let read: Option<Vec<(i64, TranscriptUsage)>> = read
             .into_iter()
-            .map(|json| json.and_then(|j| serde_json::from_str::<Tokens>(&j).ok()))
-            .try_fold(Tokens::default(), |mut sum, t| {
-                sum += t?;
+            .map(|(id, json)| Some((id, serde_json::from_str::<TranscriptUsage>(&json?).ok()?)))
+            .collect();
+        let (mut side_requests, mut side_tokens) = (0, Tokens::default());
+        let transcript = match read {
+            None => None,
+            Some(read) => {
+                let mut sum = Tokens::default();
+                let mut rows = self.conn.prepare("SELECT event_key, input, output, cache_read, cache_write FROM usage WHERE session_id = ?1")?;
+                for (session, t) in read {
+                    sum += t.tokens;
+                    // Before M1.9 transcripts kept no request ids: no side requests.
+                    if t.requests.is_empty() {
+                        continue;
+                    }
+                    let usage = rows.query_map([session], |r| {
+                        Ok((r.get::<_, String>(0)?, Tokens { input: r.get(1)?, output: r.get(2)?, cache_read: r.get(3)?, cache_write: r.get(4)? }))
+                    })?;
+                    for row in usage {
+                        let (key, tokens) = row?;
+                        if !t.requests.contains(&key) {
+                            side_requests += 1;
+                            side_tokens += tokens;
+                        }
+                    }
+                }
                 Some(sum)
-            });
-        Ok(Some(Usage { requests, tokens, cost_usd, last_ms, transcript }))
+            }
+        };
+        Ok(Some(Usage { requests, tokens, cost_usd, last_ms, transcript, side_requests, side_tokens }))
     }
 
-    pub fn set_transcript_usage(&mut self, session_id: i64, tokens: &Tokens) -> Result<()> {
+    pub fn set_transcript_usage(&mut self, session_id: i64, tokens: &TranscriptUsage) -> Result<()> {
         self.conn.execute(
             "UPDATE session SET transcript_usage = ?1 WHERE id = ?2",
             params![serde_json::to_string(tokens)?, session_id],
@@ -1131,10 +1155,28 @@ mod tests {
         assert!((u.cost_usd - 0.02).abs() < 1e-9);
 
         // The cross-check appears only once every session with usage has been read.
-        store.set_transcript_usage(s1, &Tokens { input: 10, output: 2, cache_read: 30, cache_write: 4 }).unwrap();
+        let read = |input: i64, requests: &[&str]| TranscriptUsage {
+            tokens: Tokens { input, output: 2, cache_read: 30, cache_write: 4 },
+            requests: requests.iter().map(|r| r.to_string()).collect(),
+        };
+        store.set_transcript_usage(s1, &read(10, &["req_1"])).unwrap();
         assert_eq!(store.task_usage(t.id).unwrap().unwrap().transcript, None);
-        store.set_transcript_usage(s2, &Tokens { input: 5, output: 2, cache_read: 30, cache_write: 4 }).unwrap();
-        assert_eq!(store.task_usage(t.id).unwrap().unwrap().transcript, Some(u.tokens));
+        // s2 was stored before transcripts kept request ids.
+        store.set_transcript_usage(s2, &read(5, &[])).unwrap();
+        let u = store.task_usage(t.id).unwrap().unwrap();
+        assert_eq!((u.transcript, u.side_requests), (Some(u.tokens), 0));
+        assert_eq!(u.cross_check(), "transcript agrees");
+
+        // Seen in smoke run 5: an idle worker's `away_summary` request is billed
+        // but never written to the transcript as an assistant message.
+        assert!(store.record_usage(&request("aaaaaaaa-1", "req_away", 7)).unwrap());
+        let u = store.task_usage(t.id).unwrap().unwrap();
+        assert_eq!((u.requests, u.side_requests, u.side_tokens.input), (3, 1, 7));
+        assert_eq!(u.cross_check(), "transcript agrees; 1 side request");
+
+        // A turn request the transcript lists but telemetry missed still differs.
+        store.set_transcript_usage(s1, &read(11, &["req_1", "req_lost"])).unwrap();
+        assert_eq!(store.task_usage(t.id).unwrap().unwrap().cross_check(), "transcript differs; 1 side request");
     }
 
     #[test]
